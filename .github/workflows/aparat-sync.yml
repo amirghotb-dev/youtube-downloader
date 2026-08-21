@@ -1,0 +1,36 @@
+name: YouTube to Aparat Video Auto-Sync
+
+on:
+  schedule:
+    # Runs every 6 hours automatically (00:00, 06:00, 12:00, 18:00 UTC)
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    # Allows you to trigger this workflow manually from GitHub Actions tab whenever you want!
+
+jobs:
+  sync-videos:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Check out repository code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 📦 Install yt-dlp, FFmpeg and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          pip install --upgrade yt-dlp requests
+
+      - name: 🎬 Run Video Transfer Script
+        env:
+          SITE_URL: ${{ secrets.SITE_URL }}
+          VIDEO_SYNC_SECRET: ${{ secrets.VIDEO_SYNC_SECRET }}
+          APARAT_USERNAME: ${{ secrets.APARAT_USERNAME }}
+          APARAT_PASSWORD: ${{ secrets.APARAT_PASSWORD }}
+        run: |
+          python scripts/sync_aparat.py
