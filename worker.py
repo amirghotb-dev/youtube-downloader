@@ -30,39 +30,38 @@ def get_pending_videos():
         print(f"❌ خطا در اتصال به سایت: {e}")
         return []
 
-def download_video(youtube_url, output_dir, cookie_path=None):
-    # تبدیل لینک‌های embed یا کوتاه به لینک استاندارد watch
-    match = re.search(r"(?:v=|\/embed\/|youtu\.be\/)([a-zA-Z0-9_-]{11})", youtube_url)
-    if match:
-        clean_url = f"https://www.youtube.com/watch?v={match.group(1)}"
-    else:
-        clean_url = youtube_url
-
-    print(f"⬇️ در حال دانلود ویدیو از یوتیوب: {clean_url}")
-    out_tmpl = os.path.join(output_dir, "%(id)s.%(ext)s")
+def download_video(url, output_dir, cookie_path=None):
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"🎬 در حال دانلود ویدیو از: {url}")
     
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'outtmpl': out_tmpl,
+        'outtmpl': os.path.join(output_dir, '%(id)s.%(ext)s'),
         'quiet': False,
         'no_warnings': False,
         'remote_components': ['ejs:github'],
     }
-    
+
+    # در صورت وجود فایل کوکی اختصاصی
     if cookie_path and os.path.exists(cookie_path):
-        print(f"🍪 استفاده از فایل کوکی معتبر: {cookie_path}")
+        print(f"🍪 استفاده از فایل کوکی: {cookie_path}")
         ydl_opts['cookiefile'] = cookie_path
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(clean_url, download=True)
-        video_id = info.get('id')
-        ext = info.get('ext', 'mp4')
-        file_path = os.path.join(output_dir, f"{video_id}.{ext}")
-        if not os.path.exists(file_path):
-            files = [os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.startswith(video_id)]
-            if files:
-                file_path = files[0]
-        return file_path
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            video_id = info.get('id')
+            title = info.get('title')
+            ext = info.get('ext', 'mp4')
+            file_path = os.path.join(output_dir, f"{video_id}.{ext}")
+            
+            print(f"\n✅ دانلود با موفقیت کامل شد!")
+            print(f"📌 عنوان: {title}")
+            print(f"📁 مسیر ذخیره: {file_path}")
+            return file_path
+    except Exception as e:
+        print(f"❌ خطا در دانلود ویدیو: {e}")
+        return None
 
 def upload_video_to_site(item_type, item_id, file_path):
     url = f"{SITE_URL}/api/v1/sync/upload-video"

@@ -22,6 +22,11 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
+      - name: Setup Deno (For YouTube JS Challenge Solver)
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: v1.x
+
       - name: Install FFmpeg
         run: |
           sudo apt-get update
