@@ -22,10 +22,10 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Setup Deno (For YouTube JS Challenge Solver)
-        uses: denoland/setup-deno@v1
+      - name: Install Deno (JavaScript Runtime for YouTube Solver)
+        uses: denoland/setup-deno@v2
         with:
-          deno-version: v1.x
+          deno-version: v2.x
 
       - name: Install FFmpeg
         run: |

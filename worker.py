@@ -33,12 +33,9 @@ def get_pending_videos():
 def download_video(url, output_dir, cookie_path=None):
     os.makedirs(output_dir, exist_ok=True)
     
-    # تبدیل لینک‌های embed یا کوتاه به لینک استاندارد watch
+    # تبدیل لینک به فرمت استاندارد watch
     match = re.search(r"(?:v=|\/embed\/|youtu\.be\/)([a-zA-Z0-9_-]{11})", url)
-    if match:
-        target_url = f"https://www.youtube.com/watch?v={match.group(1)}"
-    else:
-        target_url = url
+    target_url = f"https://www.youtube.com/watch?v={match.group(1)}" if match else url
 
     print(f"🎬 در حال دانلود ویدیو از: {target_url}")
     
