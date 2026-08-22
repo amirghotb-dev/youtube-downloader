@@ -39,20 +39,34 @@ def get_pending_tasks():
         print(f"❌ Error connecting to site: {e}")
     return []
 
+import re
+
+def normalize_youtube_url(url):
+    """Convert embed or short URLs to standard watch URL"""
+    match = re.search(r'(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})', url)
+    if match:
+        return f"https://www.youtube.com/watch?v={match.group(1)}"
+    return url
+
 def download_youtube_video(youtube_url, output_path):
     """
     Download video from YouTube using yt-dlp.
     Optimized for web playback: 720p H.264 mp4 format.
+    Uses Android/iOS player clients and custom user-agent to bypass bot detection on datacenter IPs.
     """
-    print(f"⬇️ Downloading video with yt-dlp: {youtube_url}")
+    clean_url = normalize_youtube_url(youtube_url)
+    print(f"⬇️ Downloading video with yt-dlp: {clean_url}")
+    
     cmd = [
         "yt-dlp",
+        "--extractor-args", "youtube:player_client=android,web_creator,ios",
         "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best",
         "--merge-output-format", "mp4",
         "-o", output_path,
         "--no-playlist",
         "--no-check-certificates",
-        youtube_url
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        clean_url
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode == 0 and os.path.exists(output_path):
@@ -60,7 +74,7 @@ def download_youtube_video(youtube_url, output_path):
         print(f"✅ Video downloaded successfully! ({size_mb:.2f} MB)")
         return True
     else:
-        print(f"❌ Download failed: {result.stderr}")
+        print(f"❌ Download failed: {result.stderr or result.stdout}")
         return False
 
 def upload_video_to_site(task, file_path):
