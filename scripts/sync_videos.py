@@ -11,10 +11,23 @@ from pathlib import Path
 SITE_URL = os.environ.get("SITE_URL", "").rstrip("/")
 VIDEO_SYNC_SECRET = os.environ.get("VIDEO_SYNC_SECRET", "ninten2_secret_sync_key_2026")
 MAX_VIDEOS_PER_RUN = int(os.environ.get("MAX_VIDEOS_PER_RUN", "3"))
+YOUTUBE_COOKIES = os.environ.get("YOUTUBE_COOKIES", "").strip()
 
 if not SITE_URL:
     print("❌ Error: SITE_URL environment variable is required!")
     sys.exit(1)
+
+# Write cookies to temporary file if available
+COOKIES_FILE = None
+if YOUTUBE_COOKIES:
+    try:
+        temp_cookie = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt')
+        temp_cookie.write(YOUTUBE_COOKIES)
+        temp_cookie.close()
+        COOKIES_FILE = temp_cookie.name
+        print("🍪 YouTube cookies loaded successfully from secrets.")
+    except Exception as e:
+        print(f"⚠️ Warning: Could not create temporary cookie file: {e}")
 
 def get_headers():
     return {
@@ -50,16 +63,19 @@ def normalize_youtube_url(url):
 
 def download_youtube_video(youtube_url, output_path):
     """
-    Download video from YouTube using yt-dlp.
-    Uses ios and tv embedded clients which do not require login/cookies on GitHub datacenter IPs.
+    Download video from YouTube using yt-dlp with optional cookies.
     """
     clean_url = normalize_youtube_url(youtube_url)
     print(f"⬇️ Downloading video with yt-dlp: {clean_url}")
     
-    # Try 1: iOS & Web/TV embedded clients without PO token requirement
+    base_args = []
+    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
+        base_args.extend(["--cookies", COOKIES_FILE])
+    
+    # Try 1: Standard high quality download
     cmd = [
         "yt-dlp",
-        "--extractor-args", "youtube:player_client=ios,tv;player_skip=configs",
+        *base_args,
         "-f", "best[ext=mp4]/bestvideo[height<=720]+bestaudio/best",
         "--merge-output-format", "mp4",
         "-o", output_path,
@@ -75,11 +91,12 @@ def download_youtube_video(youtube_url, output_path):
         print(f"✅ Video downloaded successfully! ({size_mb:.2f} MB)")
         return True
     
-    # Fallback Try 2: Generic format download with ios & mweb client
-    print(f"⚠️ Primary client failed, trying fallback client...")
+    # Fallback Try 2: With iOS/TV extractor args fallback
+    print(f"⚠️ Primary download attempt failed, trying fallback client...")
     fallback_cmd = [
         "yt-dlp",
-        "--extractor-args", "youtube:player_client=ios,mweb",
+        *base_args,
+        "--extractor-args", "youtube:player_client=ios,tv;player_skip=configs",
         "-f", "best[height<=720]/best",
         "--merge-output-format", "mp4",
         "-o", output_path,

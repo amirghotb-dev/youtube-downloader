@@ -30,6 +30,7 @@ jobs:
         env:
           SITE_URL: ${{ secrets.SITE_URL }}
           VIDEO_SYNC_SECRET: ${{ secrets.VIDEO_SYNC_SECRET }}
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
           MAX_VIDEOS_PER_RUN: 5
         run: |
           python scripts/sync_videos.py
