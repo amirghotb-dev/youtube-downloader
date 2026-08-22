@@ -1,4 +1,4 @@
-name: YouTube to Aparat Video Auto-Sync
+name: YouTube to Self-Hosted Video Auto-Sync
 
 on:
   schedule:
@@ -30,7 +30,6 @@ jobs:
         env:
           SITE_URL: ${{ secrets.SITE_URL }}
           VIDEO_SYNC_SECRET: ${{ secrets.VIDEO_SYNC_SECRET }}
-          APARAT_USERNAME: ${{ secrets.APARAT_USERNAME }}
-          APARAT_PASSWORD: ${{ secrets.APARAT_PASSWORD }}
+          MAX_VIDEOS_PER_RUN: 5
         run: |
-          python scripts/sync_aparat.py
+          python scripts/sync_videos.py
