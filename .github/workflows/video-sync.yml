@@ -20,10 +20,13 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: 📦 Install yt-dlp, FFmpeg, Node.js and dependencies
+      - name: 📦 Install yt-dlp, FFmpeg, Deno, Node.js and dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg nodejs
+          # Install Deno for JS execution in yt-dlp
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> $GITHUB_PATH
           pip install --upgrade yt-dlp requests
 
       - name: 🎬 Run Video Transfer Script

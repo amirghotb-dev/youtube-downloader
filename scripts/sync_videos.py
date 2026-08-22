@@ -63,55 +63,87 @@ def normalize_youtube_url(url):
 
 def download_youtube_video(youtube_url, output_path):
     """
-    Download video from YouTube using yt-dlp with optional cookies.
+    Download video from YouTube using yt-dlp with multiple client and cookie fallback strategies.
     """
     clean_url = normalize_youtube_url(youtube_url)
     print(f"⬇️ Downloading video with yt-dlp: {clean_url}")
     
-    base_args = []
-    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
-        base_args.extend(["--cookies", COOKIES_FILE])
-    
-    # Try 1: Standard high quality download
-    cmd = [
-        "yt-dlp",
-        *base_args,
-        "-f", "best[ext=mp4]/bestvideo[height<=720]+bestaudio/best",
-        "--merge-output-format", "mp4",
-        "-o", output_path,
-        "--no-playlist",
-        "--no-check-certificates",
-        "--retries", "5",
-        clean_url
+    # Try strategies in order of reliability for YouTube bot evasion and datacenter IP rate limits
+    strategies = [
+        # Strategy 1: iOS client WITHOUT cookies (often bypasses 429 and n-challenge completely)
+        {
+            "name": "iOS client (No cookies)",
+            "use_cookies": False,
+            "args": ["--extractor-args", "youtube:player_client=ios;player_skip=configs"]
+        },
+        # Strategy 2: TV client with cookies
+        {
+            "name": "TV embedded (With cookies)",
+            "use_cookies": True,
+            "args": ["--extractor-args", "youtube:player_client=tv;player_skip=configs"]
+        },
+        # Strategy 3: Android client
+        {
+            "name": "Android client",
+            "use_cookies": True,
+            "args": ["--extractor-args", "youtube:player_client=android"]
+        },
+        # Strategy 4: Web embedded (mweb,web_embedded)
+        {
+            "name": "Web embedded",
+            "use_cookies": True,
+            "args": ["--extractor-args", "youtube:player_client=mweb,web_embedded"]
+        },
+        # Strategy 5: Standard Web with cookies
+        {
+            "name": "Standard Web (With cookies)",
+            "use_cookies": True,
+            "args": ["--extractor-args", "youtube:player_client=web"]
+        },
+        # Strategy 6: Default generic
+        {
+            "name": "Default auto",
+            "use_cookies": False,
+            "args": []
+        }
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
     
-    if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
-        size_mb = os.path.getsize(output_path) / (1024 * 1024)
-        print(f"✅ Video downloaded successfully! ({size_mb:.2f} MB)")
-        return True
-    
-    # Fallback Try 2: With iOS/TV extractor args fallback
-    print(f"⚠️ Primary download attempt failed, trying fallback client...")
-    fallback_cmd = [
-        "yt-dlp",
-        *base_args,
-        "--extractor-args", "youtube:player_client=ios,tv;player_skip=configs",
-        "-f", "best[height<=720]/best",
-        "--merge-output-format", "mp4",
-        "-o", output_path,
-        "--no-playlist",
-        clean_url
-    ]
-    fb_result = subprocess.run(fallback_cmd, capture_output=True, text=True)
-    
-    if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
-        size_mb = os.path.getsize(output_path) / (1024 * 1024)
-        print(f"✅ Video downloaded successfully via fallback! ({size_mb:.2f} MB)")
-        return True
-    else:
-        print(f"❌ Download failed: {result.stderr or fb_result.stderr}")
-        return False
+    for idx, strat in enumerate(strategies, 1):
+        print(f"🔄 Attempt {idx}/{len(strategies)} using [{strat['name']}]...")
+        
+        cmd = [
+            "yt-dlp",
+            *strat["args"],
+            "-f", "best[ext=mp4]/bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+            "--merge-output-format", "mp4",
+            "-o", output_path,
+            "--no-playlist",
+            "--no-check-certificates",
+            "--retries", "3",
+            "--socket-timeout", "30",
+        ]
+        
+        if strat["use_cookies"] and COOKIES_FILE and os.path.exists(COOKIES_FILE):
+            cmd.extend(["--cookies", COOKIES_FILE])
+            
+        cmd.append(clean_url)
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+            size_mb = os.path.getsize(output_path) / (1024 * 1024)
+            print(f"✅ Video downloaded successfully using [{strat['name']}]! ({size_mb:.2f} MB)")
+            return True
+        else:
+            err_msg = (result.stderr or result.stdout or "").strip()
+            # Pick a meaningful short error line
+            lines = [l for l in err_msg.split('\n') if 'ERROR' in l or 'HTTP Error' in l or 'Sign in' in l]
+            short_err = lines[-1] if lines else (err_msg.split('\n')[-1] if err_msg else "Unknown error")
+            print(f"⚠️ [{strat['name']}] failed: {short_err}")
+            time.sleep(1)
+            
+    print("❌ All download strategies failed for this video.")
+    return False
 
 def upload_video_to_site(task, file_path):
     """
