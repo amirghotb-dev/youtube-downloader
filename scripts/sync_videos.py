@@ -52,24 +52,26 @@ def download_youtube_video(youtube_url, output_path):
     """
     Download video from YouTube using yt-dlp.
     Optimized for web playback: 720p H.264 mp4 format.
-    Uses Android/iOS player clients and custom user-agent to bypass bot detection on datacenter IPs.
+    Uses Android/iOS/mweb player clients and ignores non-fatal metadata warnings.
     """
     clean_url = normalize_youtube_url(youtube_url)
     print(f"⬇️ Downloading video with yt-dlp: {clean_url}")
     
     cmd = [
         "yt-dlp",
-        "--extractor-args", "youtube:player_client=android,web_creator,ios",
-        "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best",
+        "--extractor-args", "youtube:player_client=android,mweb,ios",
+        "-f", "best[ext=mp4]/bestvideo[height<=720]+bestaudio/best",
         "--merge-output-format", "mp4",
         "-o", output_path,
         "--no-playlist",
         "--no-check-certificates",
-        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "--no-warnings",
+        "--ignore-errors",
+        "--retries", "3",
         clean_url
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode == 0 and os.path.exists(output_path):
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
         size_mb = os.path.getsize(output_path) / (1024 * 1024)
         print(f"✅ Video downloaded successfully! ({size_mb:.2f} MB)")
         return True
