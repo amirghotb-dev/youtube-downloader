@@ -70,25 +70,25 @@ def download_youtube_video(youtube_url, output_path):
     
     # Try strategies in order of reliability for YouTube bot evasion and datacenter IP rate limits
     strategies = [
-        # Strategy 1: iOS client WITHOUT cookies (often bypasses 429 and n-challenge completely)
+        # Strategy 1: android_vr (bypasses bot detection & sign-in checks on datacenter IPs)
         {
-            "name": "iOS client (No cookies)",
+            "name": "Android VR client",
             "use_cookies": False,
-            "args": ["--extractor-args", "youtube:player_client=ios;player_skip=configs"]
+            "args": ["--extractor-args", "youtube:player_client=android_vr"]
         },
-        # Strategy 2: TV client with cookies
+        # Strategy 2: tv_embedded client
         {
-            "name": "TV embedded (With cookies)",
-            "use_cookies": True,
-            "args": ["--extractor-args", "youtube:player_client=tv;player_skip=configs"]
+            "name": "TV Embedded client",
+            "use_cookies": False,
+            "args": ["--extractor-args", "youtube:player_client=tv_embedded"]
         },
-        # Strategy 3: Android client
+        # Strategy 3: android_vr with cookies
         {
-            "name": "Android client",
+            "name": "Android VR (With cookies)",
             "use_cookies": True,
-            "args": ["--extractor-args", "youtube:player_client=android"]
+            "args": ["--extractor-args", "youtube:player_client=android_vr"]
         },
-        # Strategy 4: Web embedded (mweb,web_embedded)
+        # Strategy 4: Web embedded
         {
             "name": "Web embedded",
             "use_cookies": True,
@@ -100,7 +100,7 @@ def download_youtube_video(youtube_url, output_path):
             "use_cookies": True,
             "args": ["--extractor-args", "youtube:player_client=web"]
         },
-        # Strategy 6: Default generic
+        # Strategy 6: Default auto
         {
             "name": "Default auto",
             "use_cookies": False,
