@@ -56,10 +56,10 @@ def download_youtube_video(youtube_url, output_path):
     clean_url = normalize_youtube_url(youtube_url)
     print(f"⬇️ Downloading video with yt-dlp: {clean_url}")
     
-    # Try 1: iOS & TV embedded clients (most reliable against bot detection)
+    # Try 1: iOS & Web/TV embedded clients without PO token requirement
     cmd = [
         "yt-dlp",
-        "--extractor-args", "youtube:player_client=ios,tv,android_creator;player_skip=configs",
+        "--extractor-args", "youtube:player_client=ios,tv;player_skip=configs",
         "-f", "best[ext=mp4]/bestvideo[height<=720]+bestaudio/best",
         "--merge-output-format", "mp4",
         "-o", output_path,
@@ -75,11 +75,11 @@ def download_youtube_video(youtube_url, output_path):
         print(f"✅ Video downloaded successfully! ({size_mb:.2f} MB)")
         return True
     
-    # Fallback Try 2: Generic format download with mweb client
+    # Fallback Try 2: Generic format download with ios & mweb client
     print(f"⚠️ Primary client failed, trying fallback client...")
     fallback_cmd = [
         "yt-dlp",
-        "--extractor-args", "youtube:player_client=mweb,tv",
+        "--extractor-args", "youtube:player_client=ios,mweb",
         "-f", "best[height<=720]/best",
         "--merge-output-format", "mp4",
         "-o", output_path,
