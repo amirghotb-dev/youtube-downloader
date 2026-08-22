@@ -32,7 +32,15 @@ def get_pending_videos():
 
 def download_video(url, output_dir, cookie_path=None):
     os.makedirs(output_dir, exist_ok=True)
-    print(f"🎬 در حال دانلود ویدیو از: {url}")
+    
+    # تبدیل لینک‌های embed یا کوتاه به لینک استاندارد watch
+    match = re.search(r"(?:v=|\/embed\/|youtu\.be\/)([a-zA-Z0-9_-]{11})", url)
+    if match:
+        target_url = f"https://www.youtube.com/watch?v={match.group(1)}"
+    else:
+        target_url = url
+
+    print(f"🎬 در حال دانلود ویدیو از: {target_url}")
     
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
@@ -49,7 +57,7 @@ def download_video(url, output_dir, cookie_path=None):
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+            info = ydl.extract_info(target_url, download=True)
             video_id = info.get('id')
             title = info.get('title')
             ext = info.get('ext', 'mp4')
