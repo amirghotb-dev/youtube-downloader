@@ -54,6 +54,7 @@ const DEST_DIR = params['dest-dir'] || path.join(process.cwd(), 'downloads');
 const SINGLE_URL = params['single-url'] || null;
 const ZIP_PASSWORD = params['zip-password'] || process.env.ZIP_PASSWORD || 'ninten2.ir';
 const PART_SIZE_MB = parseInt(params['part-size-mb'] || '2000', 10) || 2000; // 2GB parts
+const BATCH_LIMIT = parseInt(params['limit'] || '50', 10) || 50;
 
 /**
  * Package and split file into 2GB password-protected parts if file exceeds 2GB (PART_SIZE_MB)
@@ -365,9 +366,9 @@ async function run() {
             system_platform: 'Nintendo Switch',
         }];
     } else {
-        console.log('📡 Checking website API for pending games to download...');
+        console.log(`📡 Checking website API for pending games to download (up to ${BATCH_LIMIT})...`);
         try {
-            const res = await apiRequest('/api/v1/games/queue/pending?limit=1');
+            const res = await apiRequest(`/api/v1/games/queue/pending?limit=${BATCH_LIMIT}`);
             queueItems = res.data || [];
         } catch (err) {
             console.error(`❌ Failed to connect to API: ${err.message}`);
