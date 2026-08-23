@@ -2,7 +2,6 @@
 
 /**
  * Nintendo Switch Games Automated Sync & Upload Pipeline
- * For GitHub Actions & External Worker Repositories
  * 
  * Flow:
  * 1. Queries website API for pending NSWPedia games in queue (/api/v1/games/queue/pending)
@@ -22,6 +21,8 @@ const { execSync } = require('child_process');
 const {
     scrapeGame,
     downloadFile,
+    cleanGameTitle,
+    generateRomFilename,
     formatBytes,
     sanitizeFilename
 } = require('./nswpedia_scraper.cjs');
@@ -48,6 +49,72 @@ const SYNC_TOKEN = params['api-token'] || process.env.SYNC_API_TOKEN || 'ninten2
 const REFRESH_TOKEN = params['refresh-token'] || process.env.ABREHAMRAHI_REFRESH_TOKEN;
 const DEST_DIR = params['dest-dir'] || path.join(process.cwd(), 'downloads');
 const SINGLE_URL = params['single-url'] || null;
+const ZIP_PASSWORD = params['zip-password'] || process.env.ZIP_PASSWORD || 'ninten2.ir';
+
+/**
+ * Package a downloaded file into a password-protected zip file
+ */
+function createProtectedZip(sourceFilePath, outputZipPath, password = ZIP_PASSWORD) {
+    const sourceExt = path.extname(sourceFilePath).toLowerCase();
+    const tempExtractDir = path.join(path.dirname(sourceFilePath), `ext_${Date.now()}_${Math.floor(Math.random() * 1000)}`);
+    
+    let extracted = false;
+
+    // Check if zip command is available
+    let hasZip = false;
+    try {
+        execSync('which zip', { stdio: 'ignore' });
+        hasZip = true;
+    } catch {}
+
+    if (!hasZip) {
+        throw new Error('zip command line utility is not available on this system.');
+    }
+
+    // Try extracting if it is a regular zip/rar/7z archive so the user gets clean internal files
+    if (['.zip', '.rar', '.7z'].includes(sourceExt)) {
+        try {
+            fs.mkdirSync(tempExtractDir, { recursive: true });
+            
+            let has7z = false;
+            try { execSync('which 7z', { stdio: 'ignore' }); has7z = true; } catch {}
+            
+            let hasUnzip = false;
+            try { execSync('which unzip', { stdio: 'ignore' }); hasUnzip = true; } catch {}
+
+            if (sourceExt === '.zip' && hasUnzip) {
+                execSync(`unzip -q -o "${sourceFilePath}" -d "${tempExtractDir}"`, { stdio: 'ignore' });
+                extracted = true;
+            } else if (has7z) {
+                execSync(`7z x -y -o"${tempExtractDir}" "${sourceFilePath}"`, { stdio: 'ignore' });
+                extracted = true;
+            }
+        } catch (e) {
+            extracted = false;
+        }
+    }
+
+    if (fs.existsSync(outputZipPath)) {
+        fs.unlinkSync(outputZipPath);
+    }
+
+    if (extracted) {
+        // Zip contents of extracted directory
+        const cmd = `cd "${tempExtractDir}" && zip -q -1 -r -P "${password}" "${outputZipPath}" .`;
+        execSync(cmd, { stdio: 'ignore' });
+        
+        // Clean extract dir
+        fs.rmSync(tempExtractDir, { recursive: true, force: true });
+    } else {
+        // Zip the source file directly
+        const sourceDir = path.dirname(sourceFilePath);
+        const sourceBase = path.basename(sourceFilePath);
+        const cmd = `cd "${sourceDir}" && zip -q -1 -P "${password}" "${outputZipPath}" "${sourceBase}"`;
+        execSync(cmd, { stdio: 'ignore' });
+    }
+
+    return outputZipPath;
+}
 
 /**
  * Generic JSON HTTP Request helper
@@ -229,6 +296,8 @@ async function run() {
             console.log(`    Title:     ${gameData.title}`);
             console.log(`    Title ID:  ${gameData.titleId || 'N/A'}`);
             console.log(`    Firmware:  ${gameData.requiredFirmware || 'N/A'}`);
+            console.log(`    Cover:     ${gameData.cover ? 'Found' : 'None'}`);
+            console.log(`    Screens:   ${gameData.screenshots.length} screenshot(s) found`);
             console.log(`    Mirrors:   ${gameData.downloads.length} mirror link(s) found\n`);
 
             // 4. Select candidate download files
@@ -270,21 +339,25 @@ async function run() {
                 console.log(`    Type:   ${fileItem.type} | Format: ${fileItem.format || 'NSP'}`);
                 console.log(`    Source: ${fileItem.directUrl}`);
 
-                // Determine filename and path
-                const ext = fileItem.format ? `.${fileItem.format.toLowerCase()}` : '.nsp';
-                let safeName = sanitizeFilename(fileItem.name);
-                if (!safeName.endsWith(ext)) {
-                    safeName += ext;
-                }
+                // Step A: Determine clean final filename for the game archive
+                const finalZipName = generateRomFilename(gameData.title, fileItem, '.zip');
+                const tempExt = fileItem.format ? `.${fileItem.format.toLowerCase()}` : '.nsp';
+                const tempDownloadName = `temp_${Date.now()}_${cleanFolderName(gameData.title)}_${i + 1}${tempExt}`;
+                const tempLocalFilePath = path.join(DEST_DIR, tempDownloadName);
 
-                const localFilePath = path.join(DEST_DIR, safeName);
-
-                // Step A: Download
-                console.log(`    Saving locally to: ${localFilePath}`);
-                const dlResult = await downloadRomFile(fileItem.directUrl, localFilePath);
+                // Step B: Download file locally
+                console.log(`    Saving temporary download to: ${tempLocalFilePath}`);
+                const dlResult = await downloadRomFile(fileItem.directUrl, tempLocalFilePath);
                 console.log(`\n    ✅ Downloaded successfully: ${formatBytes(dlResult.totalBytes)}`);
 
-                // Step B: Upload to AbreHamrahi Cloud (Refresh token right before uploading to avoid expiration during long downloads)
+                // Step C: Package & encrypt into password-protected zip file
+                const protectedZipPath = path.join(DEST_DIR, finalZipName);
+                console.log(`    🔒 Packaging into protected Zip with password '${ZIP_PASSWORD}' -> ${finalZipName}...`);
+                createProtectedZip(tempLocalFilePath, protectedZipPath, ZIP_PASSWORD);
+                const zipStats = fs.statSync(protectedZipPath);
+                console.log(`    ✅ Protected Zip ready: ${formatBytes(zipStats.size)}`);
+
+                // Step D: Upload to AbreHamrahi Cloud
                 console.log(`    🔑 Refreshing AbreHamrahi access token...`);
                 const currentAccessToken = await getAccessToken(REFRESH_TOKEN);
 
@@ -294,28 +367,42 @@ async function run() {
                 console.log(`    ☁️ Resolving AbreHamrahi folder: "${targetHamrahiFolder}"...`);
                 const folderId = await resolveFolderPath(currentAccessToken, targetHamrahiFolder);
 
-                console.log(`    ☁️ Uploading to AbreHamrahi...`);
-                const uploadResult = await uploadFileToHamrahi(currentAccessToken, localFilePath, folderId, safeName);
+                console.log(`    ☁️ Uploading to AbreHamrahi (${finalZipName})...`);
+                const uploadResult = await uploadFileToHamrahi(currentAccessToken, protectedZipPath, folderId, finalZipName);
 
                 console.log(`    🎉 Upload Complete! Public Link: ${uploadResult.public_url}`);
 
-                // Step C: Delete local file immediately to free disk space!
-                if (fs.existsSync(localFilePath)) {
-                    fs.unlinkSync(localFilePath);
-                    console.log(`    🧹 Cleaned up temporary local file: ${safeName}`);
+                // Step E: Clean up temporary local files
+                if (fs.existsSync(tempLocalFilePath)) {
+                    fs.unlinkSync(tempLocalFilePath);
+                }
+                if (fs.existsSync(protectedZipPath)) {
+                    fs.unlinkSync(protectedZipPath);
+                    console.log(`    🧹 Cleaned up temporary local files: ${finalZipName}`);
                 }
 
-                // Step D: Record file metadata
+                // Step F: Record file metadata
                 let fileTypeKey = 'base_game';
                 if (fileItem.type === 'Update') fileTypeKey = 'update';
                 else if (fileItem.type === 'DLC') fileTypeKey = 'dlc';
 
+                let displayTitle = `${cleanGameTitle(gameData.title).replace(/_/g, ' ')}`;
+                if (fileItem.type === 'Base Game') {
+                    displayTitle += ' - نسخه اصلی بازی';
+                } else if (fileItem.type === 'Update') {
+                    displayTitle += ` - آپدیت ${fileItem.version || ''}`.trim();
+                } else if (fileItem.type === 'DLC') {
+                    displayTitle += ' - بسته الحاقی (DLC)';
+                }
+
                 uploadedFiles.push({
                     file_type: fileTypeKey,
-                    title: safeName,
+                    title: finalZipName,
+                    display_title: displayTitle,
                     version: fileItem.version || 'v1.0.0',
                     file_size: formatBytes(uploadResult.size),
-                    file_format: fileItem.format || 'NSP',
+                    file_format: 'ZIP',
+                    password: ZIP_PASSWORD,
                     part_number: 1,
                     total_parts: 1,
                     server_name: 'سرور اختصاصی مستقیم ابر همراهی (نیم‌بها)',
@@ -333,17 +420,18 @@ async function run() {
                 title_id: gameData.titleId || null,
                 scraped_data: {
                     title: gameData.title,
-                    title_id: gameData.titleId,
-                    required_firmware: gameData.requiredFirmware,
-                    developer: gameData.developer || 'Nintendo',
+                    title_id: gameData.titleId || null,
+                    required_firmware: gameData.requiredFirmware || null,
+                    developer: gameData.developer || gameData.publisher || 'Nintendo',
                     publisher: gameData.publisher || 'Nintendo',
-                    release_date: gameData.releaseDate,
+                    release_date: gameData.releaseDate || null,
                     format: gameData.format || 'NSP',
-                    cover_image: gameData.coverImage,
+                    cover_image: gameData.cover_image || gameData.cover || null,
+                    banner_image: gameData.banner_image || gameData.banner || null,
                     screenshots: gameData.screenshots || [],
                     summary: gameData.description ? gameData.description.substring(0, 300) : '',
                     description: gameData.description || '',
-                    genres: gameData.genres || ['Action', 'Adventure'],
+                    genres: gameData.genres || ['Arcade', 'Action'],
                 },
                 uploaded_files: uploadedFiles,
             };

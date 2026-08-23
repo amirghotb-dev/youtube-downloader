@@ -26,10 +26,10 @@ jobs:
         with:
           node-version: '20'
 
-      - name: 📦 Install High-Speed Download Tools (Aria2)
+      - name: 📦 Install High-Speed Download & Packaging Tools (Aria2, Zip, 7z)
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2
+          sudo apt-get install -y aria2 p7zip-full zip unzip
 
       - name: ⚡ Execute NSWPedia Sync Pipeline
         id: sync_step

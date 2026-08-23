@@ -129,6 +129,48 @@ function sanitizeFilename(name) {
 }
 
 /**
+ * Clean and format clean title from raw game name
+ */
+function cleanGameTitle(title) {
+    let clean = (title || 'Nintendo_Switch_Game')
+        .replace(/^Download\s+/i, '')
+        .replace(/\s*(?:NSP|XCI|NSZ|Full Game|\+ Update|Update|DLC|v\d+[\.\d]*)\b/gi, '')
+        .replace(/[^a-zA-Z0-9_\- ]/g, ' ')
+        .trim()
+        .replace(/\s+/g, '_');
+    return clean || 'Nintendo_Switch_Game';
+}
+
+/**
+ * Generate proper file name for download/ROM item
+ */
+function generateRomFilename(gameTitle, item, extOverride = null) {
+    const base = cleanGameTitle(gameTitle);
+    const raw = (item.name || '').trim();
+    const isGeneric = /^(all files|full game|base game|main game|download|rom|game file|update|dlc|game)$/i.test(raw);
+
+    const ext = extOverride || (item.format ? `.${item.format.toLowerCase()}` : '.nsp');
+
+    if (!isGeneric && raw.length > 3 && raw.toLowerCase().includes(base.toLowerCase().replace(/_/g, ' ').substring(0, 6))) {
+        let safe = sanitizeFilename(raw);
+        if (!safe.toLowerCase().endsWith(ext.toLowerCase())) {
+            safe += ext;
+        }
+        return safe;
+    }
+
+    let typeSuffix = '';
+    if (item.type === 'Update') {
+        const ver = item.version && item.version !== 'Update' ? `_${item.version}` : '_Update';
+        typeSuffix = ver;
+    } else if (item.type === 'DLC') {
+        typeSuffix = '_DLC';
+    }
+
+    return `${base}${typeSuffix}${ext}`;
+}
+
+/**
  * Parse ROM details (Type, Version, Format) from item title
  */
 function parseRomItemDetails(title, formatHint = '') {
@@ -151,11 +193,11 @@ function parseRomItemDetails(title, formatHint = '') {
         format = 'NSP';
     }
 
-    if (/update/i.test(raw) || /v\d+(\.\d+)+/i.test(raw) || /\[v\d+\]/i.test(raw)) {
+    if (/update/i.test(raw) || /v?\d+(\.\d+)+/i.test(raw) || /\[v?\d+\]/i.test(raw)) {
         type = 'Update';
-        const vMatch = raw.match(/v(\d+(\.\d+)*)/i) || raw.match(/\[v(\d+)\]/i);
+        const vMatch = raw.match(/v?(\d+(\.\d+)+)/i) || raw.match(/\[v?(\d+)\]/i);
         if (vMatch) {
-            version = vMatch[0].startsWith('v') ? vMatch[0] : `v${vMatch[1]}`;
+            version = vMatch[0].startsWith('v') || vMatch[0].startsWith('V') ? vMatch[0] : `v${vMatch[1]}`;
         } else {
             version = 'Update';
         }
@@ -295,34 +337,110 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
     const h1Match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
     const title = h1Match ? stripHtml(h1Match[1]) : '';
 
-    // 2. Cover & Screenshots
-    const coverMatch = html.match(/<meta\s+property="og:image"\s+content="([^"]+)"/i) ||
-                       html.match(/<img[^>]+class="[^"]*attachment-post-thumbnail[^"]*"[^>]+src="([^"]+)"/i);
-    const cover = coverMatch ? coverMatch[1] : null;
+    // 2. Info Block Metadata (Title ID, Firmware, Release Date, Publisher)
+    let titleId = null;
+    const tidMatch = html.match(/Title ID<\/span>\s*<span[^>]*>([0-9A-Fa-f]{16})<\/span>/i) ||
+                     html.match(/Title ID[^<]*<\/span>[\s\S]*?<span[^>]*>([0-9A-Fa-f]{16})<\/span>/i);
+    if (tidMatch) titleId = tidMatch[1].trim();
 
-    const screenshots = [];
-    const ssRegex = /<a[^>]+class="[^"]*screen_shot[^"]*"[^>]+href="([^"]+)"/gi;
-    let sMatch;
-    while ((sMatch = ssRegex.exec(html)) !== null) {
-        if (!screenshots.includes(sMatch[1])) {
-            screenshots.push(sMatch[1]);
+    let releaseDate = null;
+    const rdMatch = html.match(/Release Date<\/span>\s*<span[^>]*>([^<]+)<\/span>/i) ||
+                    html.match(/Release Date[^<]*<\/span>[\s\S]*?<span[^>]*>([^<]+)<\/span>/i);
+    if (rdMatch) releaseDate = stripHtml(rdMatch[1]);
+
+    let requiredFirmware = null;
+    const fwMatch = html.match(/Required Firmware<\/span>\s*<span[^>]*>([^<]+)<\/span>/i) ||
+                    html.match(/Required Firmware[^<]*<\/span>[\s\S]*?<span[^>]*>([^<]+)<\/span>/i);
+    if (fwMatch) requiredFirmware = stripHtml(fwMatch[1]);
+
+    let publisher = null;
+    const pubMatch = html.match(/Published by<\/span>\s*<span[^>]*>([\s\S]*?)<\/span>/i) ||
+                     html.match(/Published by[^<]*<\/span>[\s\S]*?<span[^>]*>([\s\S]*?)<\/span>/i);
+    if (pubMatch) publisher = stripHtml(pubMatch[1]);
+
+    // 3. Cover Boxart & Banner
+    let cover = null;
+    let banner = null;
+
+    // Check main post thumbnail image (handle any attribute order)
+    const postImgMatch = html.match(/<img\b[^>]*\bclass=['"][^'"]*(?:wp-post-image|attachment-post-thumbnail|attachment-thumbnail)[^'"]*['"][^>]*\bsrc=['"]([^'"]+)['"]/i) ||
+                         html.match(/<img\b[^>]*\bsrc=['"]([^'"]+)['"][^>]*\bclass=['"][^'"]*(?:wp-post-image|attachment-post-thumbnail|attachment-thumbnail)[^'"]*['"]/i);
+
+    if (postImgMatch) {
+        cover = postImgMatch[1] || postImgMatch[2];
+        const fullImgTag = postImgMatch[0];
+        const srcsetMatch = fullImgTag.match(/srcset=['"]([^'"]+)['"]/i);
+        if (srcsetMatch) {
+            const sources = srcsetMatch[1].split(',').map(s => s.trim().split(/\s+/));
+            if (sources.length > 0) {
+                sources.sort((a, b) => (parseInt(b[1]) || 0) - (parseInt(a[1]) || 0));
+                if (sources[0] && sources[0][0]) {
+                    cover = sources[0][0];
+                }
+            }
         }
     }
 
-    // 3. Game description
+    // Also look for og:image for banner
+    const ogMatch = html.match(/<meta\s+property=['"]og:image['"]\s+content=['"]([^'"]+)['"]/i) ||
+                    html.match(/<meta\s+content=['"]([^'"]+)['"]\s+property=['"]og:image['"]/i);
+    if (ogMatch) {
+        banner = ogMatch[1];
+    }
+
+    if (!cover) {
+        cover = banner;
+    }
+
+    // Clean thumbnail dimension suffix (-300x400.jpg -> .jpg) to get pristine full-size cover
+    if (cover) {
+        cover = cover.replace(/-\d+x\d+(\.[a-zA-Z0-9]+)$/, '$1');
+    }
+
+    // 4. Screenshots (Extract all regardless of attribute order or tag type)
+    const screenshots = [];
+
+    // Any <a> with class containing screen_shot
+    const ssLinkRegex = /<a\b[^>]*\bclass=['"][^'"]*screen_shot[^'"]*['"][^>]*\bhref=['"]([^'"]+)['"]|<a\b[^>]*\bhref=['"]([^'"]+)['"][^>]*\bclass=['"][^'"]*screen_shot[^'"]*['"]/gi;
+    let sMatch;
+    while ((sMatch = ssLinkRegex.exec(html)) !== null) {
+        const ssUrl = sMatch[1] || sMatch[2];
+        if (ssUrl && !screenshots.includes(ssUrl)) {
+            screenshots.push(ssUrl);
+        }
+    }
+
+    // Any img tag with screenshot in src or alt
+    const ssImgRegex = /<img\b[^>]+src=['"]([^'"]+screenshot[^'"]*)['"]/gi;
+    while ((sMatch = ssImgRegex.exec(html)) !== null) {
+        const ssUrl = sMatch[1];
+        if (ssUrl && !screenshots.includes(ssUrl)) {
+            screenshots.push(ssUrl);
+        }
+    }
+
+    // 5. Game description
     let description = '';
     const descMatch = html.match(/<h3>Game description<\/h3>([\s\S]*?)(?:<div class="my-3"|<a [^>]*class="btn|<center>)/i);
     if (descMatch) {
         description = stripHtml(descMatch[1]);
     }
 
-    // 4. Download main page link
+    // 6. Download main page link
     const dlBtnMatch = html.match(/<a[^>]+href=['"](https:\/\/nswpedia\.com\/download\/[^'"]+)['"][^>]*>/i);
     if (!dlBtnMatch) {
         return {
             title,
+            titleId,
+            releaseDate,
+            requiredFirmware,
+            publisher,
             gameUrl,
             cover,
+            cover_image: cover,
+            coverImage: cover,
+            banner,
+            banner_image: banner,
             screenshots,
             description,
             downloadPageUrl: null,
@@ -456,9 +574,17 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
 
     return {
         title,
+        titleId,
+        releaseDate,
+        requiredFirmware,
+        publisher,
         gameUrl,
         downloadPageUrl,
         cover,
+        cover_image: cover,
+        coverImage: cover,
+        banner,
+        banner_image: banner,
         screenshots,
         description,
         mirrors: mirrorTables,
@@ -583,12 +709,15 @@ function downloadFile(urlStr, destPath, options = {}) {
 
 // Module Exports
 module.exports = {
+    fetchUrl,
     searchGames,
     getLatestGames,
     scrapeGame,
     downloadFile,
     resolveDirectDownloadLink,
     parseRomItemDetails,
+    cleanGameTitle,
+    generateRomFilename,
     formatBytes,
     sanitizeFilename
 };
