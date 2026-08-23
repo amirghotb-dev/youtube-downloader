@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 
 /**
- * Nintendo Switch Games Automated Sync & Upload Pipeline with 2GB Multi-Part Splitting
+ * Nintendo Switch Games Automated Sync & Upload Pipeline with 2GB RAR Multi-Part Splitting
  * 
  * Flow:
  * 1. Queries website API for pending NSWPedia games in queue (/api/v1/games/queue/pending)
  * 2. Scrapes metadata, cover, screenshots, and direct download mirrors using nswpedia_scraper.cjs
  * 3. Downloads Base Game, Updates, DLCs via high-speed pipeline (aria2 / stream)
  * 4. Validates downloaded file (rejects HTML/403 error pages)
- * 5. Packages & splits into 2GB password-protected parts (e.g. .7z.001, .7z.002) if > 2GB
+ * 5. Packages & splits into 2GB password-protected parts (.part1.rar, .part2.rar) if > 2GB
  * 6. Uploads all parts to AbreHamrahi Cloud with structured folders (Nintendo_Switch/<Game_Title>/...)
  * 7. Cleans up local files to preserve runner disk space
  * 8. Sends public Hamrahi links and part metadata back to website API (/api/v1/games/queue/complete)
@@ -67,34 +67,36 @@ function createProtectedParts(sourceFilePath, destDir, baseName, password = ZIP_
     const stats = fs.statSync(sourceFilePath);
     const totalSize = stats.size;
     const splitSizeBytes = splitSizeMb * 1024 * 1024;
-    const cleanBaseName = sanitizeFilename(baseName.replace(/\.(zip|7z|nsp|xci|rar)$/i, ''));
+    const cleanBaseName = sanitizeFilename(baseName.replace(/\.(rar|zip|7z|nsp|xci)$/i, ''));
 
+    let hasRar = false;
     let has7z = false;
     let hasZip = false;
+    try { execSync('which rar', { stdio: 'ignore' }); hasRar = true; } catch {}
     try { execSync('which 7z || which 7za', { stdio: 'ignore' }); has7z = true; } catch {}
     try { execSync('which zip', { stdio: 'ignore' }); hasZip = true; } catch {}
 
     const parts = [];
 
+    // Clean up any previous parts with same prefix
+    const existingFiles = fs.readdirSync(destDir).filter(f => f.startsWith(`${cleanBaseName}.`));
+    for (const ef of existingFiles) {
+        try { fs.unlinkSync(path.join(destDir, ef)); } catch {}
+    }
+
     // Check if multi-part splitting is needed (> 2000MB)
-    if (totalSize > splitSizeBytes && (has7z || hasZip)) {
-        console.log(`    📦 File size (${formatBytes(totalSize)}) exceeds ${splitSizeMb}MB -> Splitting into ${splitSizeMb}MB parts...`);
+    if (totalSize > splitSizeBytes && (hasRar || has7z || hasZip)) {
+        console.log(`    📦 File size (${formatBytes(totalSize)}) exceeds ${splitSizeMb}MB -> Splitting into ${splitSizeMb}MB RAR parts (.part1.rar, .part2.rar)...`);
 
-        // Clean up any previous parts with same prefix
-        const existingFiles = fs.readdirSync(destDir).filter(f => f.startsWith(`${cleanBaseName}.`));
-        for (const ef of existingFiles) {
-            try { fs.unlinkSync(path.join(destDir, ef)); } catch {}
-        }
-
-        if (has7z) {
-            // Note: 7-Zip creates split volumes using 7z format (-v).
-            // It generates .7z.001, .7z.002, etc., fully compatible with WinRAR, 7-Zip, Bandizip, ZArchiver.
-            const outputBase = path.join(destDir, `${cleanBaseName}.7z`);
-            const cmd = `7z a -v${splitSizeMb}m -mx=1 -p"${password}" "${outputBase}" "${sourceFilePath}"`;
+        if (hasRar) {
+            // Standard RAR multi-volume format (.part1.rar, .part2.rar, etc.)
+            // -m0 (Store mode, zero compression delay) + -p (password) + -ep1 (exclude paths) + -idq (quiet)
+            const outputBase = path.join(destDir, `${cleanBaseName}.rar`);
+            const cmd = `rar a -v${splitSizeMb}m -m0 -p"${password}" -ep1 -idq "${outputBase}" "${sourceFilePath}"`;
             execSync(cmd, { stdio: 'ignore' });
 
             const createdFiles = fs.readdirSync(destDir)
-                .filter(f => f.startsWith(`${cleanBaseName}.7z.`))
+                .filter(f => f.startsWith(`${cleanBaseName}.part`) && f.endsWith('.rar'))
                 .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
             if (createdFiles.length > 0) {
@@ -109,7 +111,7 @@ function createProtectedParts(sourceFilePath, destDir, baseName, password = ZIP_
                         partNumber: idx + 1,
                         totalParts: totalParts,
                         size: partStats.size,
-                        format: '7Z'
+                        format: 'RAR'
                     });
                 }
             } else if (fs.existsSync(outputBase)) {
@@ -120,19 +122,17 @@ function createProtectedParts(sourceFilePath, destDir, baseName, password = ZIP_
                     partNumber: 1,
                     totalParts: 1,
                     size: outStats.size,
-                    format: '7Z'
+                    format: 'RAR'
                 });
             }
-        } else if (hasZip) {
-            // Standard zip split format (.z01, .z02, ... .zip)
-            const outputBase = path.join(destDir, `${cleanBaseName}.zip`);
-            const sourceDir = path.dirname(sourceFilePath);
-            const sourceBase = path.basename(sourceFilePath);
-            const cmd = `cd "${sourceDir}" && zip -q -1 -s ${splitSizeMb}m -P "${password}" "${outputBase}" "${sourceBase}"`;
+        } else if (has7z) {
+            // Fallback 7z
+            const outputBase = path.join(destDir, `${cleanBaseName}.7z`);
+            const cmd = `7z a -v${splitSizeMb}m -mx=0 -mmt=on -p"${password}" "${outputBase}" "${sourceFilePath}"`;
             execSync(cmd, { stdio: 'ignore' });
 
             const createdFiles = fs.readdirSync(destDir)
-                .filter(f => f.startsWith(`${cleanBaseName}.z`) || f === `${cleanBaseName}.zip`)
+                .filter(f => f.startsWith(`${cleanBaseName}.7z.`))
                 .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
             const totalParts = createdFiles.length;
@@ -146,38 +146,54 @@ function createProtectedParts(sourceFilePath, destDir, baseName, password = ZIP_
                     partNumber: idx + 1,
                     totalParts: totalParts,
                     size: partStats.size,
-                    format: 'ZIP'
+                    format: '7Z'
                 });
             }
         }
     } else {
-        // Single part archive (under 2GB) -> use standard .zip
-        const outputZip = path.join(destDir, `${cleanBaseName}.zip`);
-        if (fs.existsSync(outputZip)) {
-            fs.unlinkSync(outputZip);
-        }
-
-        if (has7z) {
-            const cmd = `7z a -tzip -mx=1 -p"${password}" "${outputZip}" "${sourceFilePath}"`;
+        // Single part archive (under 2GB) -> use .rar or .zip
+        if (hasRar) {
+            const outputRar = path.join(destDir, `${cleanBaseName}.rar`);
+            const cmd = `rar a -m0 -p"${password}" -ep1 -idq "${outputRar}" "${sourceFilePath}"`;
             execSync(cmd, { stdio: 'ignore' });
+            const outStats = fs.statSync(outputRar);
+            parts.push({
+                path: outputRar,
+                name: path.basename(outputRar),
+                partNumber: 1,
+                totalParts: 1,
+                size: outStats.size,
+                format: 'RAR'
+            });
+        } else if (has7z) {
+            const outputZip = path.join(destDir, `${cleanBaseName}.zip`);
+            const cmd = `7z a -tzip -mx=0 -mmt=on -p"${password}" "${outputZip}" "${sourceFilePath}"`;
+            execSync(cmd, { stdio: 'ignore' });
+            const outStats = fs.statSync(outputZip);
+            parts.push({
+                path: outputZip,
+                name: path.basename(outputZip),
+                partNumber: 1,
+                totalParts: 1,
+                size: outStats.size,
+                format: 'ZIP'
+            });
         } else if (hasZip) {
+            const outputZip = path.join(destDir, `${cleanBaseName}.zip`);
             const sourceDir = path.dirname(sourceFilePath);
             const sourceBase = path.basename(sourceFilePath);
-            const cmd = `cd "${sourceDir}" && zip -q -1 -P "${password}" "${outputZip}" "${sourceBase}"`;
+            const cmd = `cd "${sourceDir}" && zip -q -0 -P "${password}" "${outputZip}" "${sourceBase}"`;
             execSync(cmd, { stdio: 'ignore' });
-        } else {
-            throw new Error('Neither 7z nor zip is available to compress ROMs.');
+            const outStats = fs.statSync(outputZip);
+            parts.push({
+                path: outputZip,
+                name: path.basename(outputZip),
+                partNumber: 1,
+                totalParts: 1,
+                size: outStats.size,
+                format: 'ZIP'
+            });
         }
-
-        const outStats = fs.statSync(outputZip);
-        parts.push({
-            path: outputZip,
-            name: path.basename(outputZip),
-            partNumber: 1,
-            totalParts: 1,
-            size: outStats.size,
-            format: 'ZIP'
-        });
     }
 
     return parts;
@@ -327,7 +343,7 @@ function cleanFolderName(title) {
 async function run() {
     console.log('===============================================================');
     console.log('🚀 Ninten2 Nintendo Switch Games Sync & Auto-Uploader Pipeline');
-    console.log(`📦 Multi-Part Splitting Threshold: ${PART_SIZE_MB} MB (2 GB)`);
+    console.log(`📦 Multi-Part Splitting (RAR): ${PART_SIZE_MB} MB (2 GB) parts`);
     console.log('===============================================================');
     console.log(`🌐 Target Website API: ${API_BASE_URL}`);
 
@@ -452,8 +468,8 @@ async function run() {
                 console.log(`    Type:   ${fileItem.type} | Format: ${fileItem.format || 'NSP'}`);
                 console.log(`    Source: ${fileItem.directUrl}`);
 
-                const baseZipName = generateRomFilename(gameData.title, fileItem, '.zip');
-                const cleanBaseName = baseZipName.replace(/\.zip$/i, '');
+                const baseRarName = generateRomFilename(gameData.title, fileItem, '.rar');
+                const cleanBaseName = baseRarName.replace(/\.(rar|zip|7z)$/i, '');
                 const subFolder = fileItem.type === 'Base Game' ? 'Base_Game' : (fileItem.type === 'Update' ? 'Updates' : 'DLC');
                 const targetHamrahiFolder = `${gameFolderName}/${subFolder}`;
 
@@ -466,17 +482,17 @@ async function run() {
 
                     // Candidate filenames to check in AbreHamrahi before downloading
                     const candidateNames = [
-                        baseZipName,
-                        `${cleanBaseName}.7z.001`,
-                        `${cleanBaseName}.7z`,
-                        `${cleanBaseName}.zip.001`,
+                        baseRarName,
+                        `${cleanBaseName}.part1.rar`,
+                        `${cleanBaseName}.rar`,
                         `${cleanBaseName}.zip`,
+                        `${cleanBaseName}.7z.001`,
                         fileItem.name,
-                        baseZipName.replace(/\.zip$/i, '.nsp'),
-                        baseZipName.replace(/\.zip$/i, '.xci'),
-                        fileItem.name.replace(/\.[a-zA-Z0-9]+$/, '') + '.zip',
-                        `${cleanFolderName(gameData.title)}_${subFolder}.zip`,
-                        `${cleanFolderName(gameData.title)}.zip`
+                        baseRarName.replace(/\.rar$/i, '.nsp'),
+                        baseRarName.replace(/\.rar$/i, '.xci'),
+                        fileItem.name.replace(/\.[a-zA-Z0-9]+$/, '') + '.rar',
+                        `${cleanFolderName(gameData.title)}_${subFolder}.rar`,
+                        `${cleanFolderName(gameData.title)}.rar`
                     ];
 
                     // Check if file already exists in AbreHamrahi
@@ -504,7 +520,7 @@ async function run() {
                             display_title: baseDisplayTitle,
                             version: fileItem.version || 'v1.0.0',
                             file_size: formatBytes(existingCloudFile.size),
-                            file_format: existingCloudFile.name.endsWith('.7z') || existingCloudFile.name.includes('.7z.') ? '7Z' : 'ZIP',
+                            file_format: existingCloudFile.name.endsWith('.rar') ? 'RAR' : (existingCloudFile.name.endsWith('.7z') ? '7Z' : 'ZIP'),
                             password: ZIP_PASSWORD,
                             part_number: 1,
                             total_parts: 1,
@@ -525,9 +541,9 @@ async function run() {
                         const dlResult = await downloadRomFile(fileItem.directUrl, tempLocalFilePath);
                         console.log(`\n    ✅ Downloaded successfully: ${formatBytes(dlResult.totalBytes)}`);
 
-                        // Step C: Package & split into 2GB password-protected parts
-                        console.log(`    🔒 Packaging and checking 2GB splitting with password '${ZIP_PASSWORD}'...`);
-                        const generatedParts = createProtectedParts(tempLocalFilePath, DEST_DIR, baseZipName, ZIP_PASSWORD, PART_SIZE_MB);
+                        // Step C: Package & split into 2GB password-protected parts (.part1.rar, .part2.rar)
+                        console.log(`    🔒 Packaging into RAR format with password '${ZIP_PASSWORD}'...`);
+                        const generatedParts = createProtectedParts(tempLocalFilePath, DEST_DIR, baseRarName, ZIP_PASSWORD, PART_SIZE_MB);
                         console.log(`    📦 Generated ${generatedParts.length} part(s).`);
 
                         // Clean up temporary downloaded source file
@@ -557,7 +573,7 @@ async function run() {
                                 display_title: partTitle,
                                 version: fileItem.version || 'v1.0.0',
                                 file_size: formatBytes(partUploadResult.size),
-                                file_format: part.format || '7Z',
+                                file_format: part.format || 'RAR',
                                 password: ZIP_PASSWORD,
                                 part_number: part.partNumber,
                                 total_parts: part.totalParts,

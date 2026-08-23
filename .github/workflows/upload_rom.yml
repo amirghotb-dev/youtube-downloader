@@ -21,14 +21,14 @@ on:
         required: false
         type: string
       split_2gb:
-        description: '📦 تقسیم به پارت‌های ۲ گیگابایتی در صورت حجم بالای ۲ گیگابایت؟'
+        description: '📦 تقسیم به پارت‌های ۲ گیگابایتی RAR (.part1.rar) در صورت حجم بالای ۲ گیگابایت؟'
         required: false
         default: 'true'
         type: boolean
 
 jobs:
   download-and-upload:
-    name: ⚡ Download, Split (2GB) & Upload to Hamrahi
+    name: ⚡ Download, Split (2GB RAR) & Upload to Hamrahi
     runs-on: ubuntu-latest
     timeout-minutes: 180
 
@@ -41,10 +41,10 @@ jobs:
         with:
           node-version: '20'
 
-      - name: 📦 Install High-Speed Download & Packaging Tools (Aria2, 7z, Zip)
+      - name: 📦 Install High-Speed Download & Packaging Tools (Aria2, RAR, 7z, Zip)
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 p7zip-full zip unzip
+          sudo apt-get install -y aria2 rar unrar p7zip-full zip unzip
 
       - name: ⚡ Download Game File via High-Speed Pipeline
         id: download_step
@@ -80,7 +80,7 @@ jobs:
           echo "FILE_SIZE=$FILE_SIZE" >> $GITHUB_ENV
           ls -lh
 
-      - name: 🔒 Package & Split into 2GB Parts (if needed)
+      - name: 🔒 Package & Split into 2GB RAR Parts (.part1.rar, .part2.rar)
         id: package_step
         run: |
           cd ./downloads
@@ -100,16 +100,16 @@ jobs:
           SPLIT_THRESHOLD=2097152000
           
           if [ "$FILE_SIZE" -gt "$SPLIT_THRESHOLD" ] && [ "${{ github.event.inputs.split_2gb }}" == "true" ]; then
-            echo "📦 File size ($FILE_SIZE bytes) exceeds 2GB -> Splitting into 2000MB password-protected parts (.7z.001, .7z.002)..."
-            7z a -v2000m -mx=1 -p"ninten2.ir" "./packaged/${BASE_NAME}.7z" "$RAW_FILE"
+            echo "📦 File size ($FILE_SIZE bytes) exceeds 2GB -> Splitting into 2000MB password-protected RAR parts (.part1.rar, .part2.rar)..."
+            rar a -v2000m -m0 -p"ninten2.ir" -ep1 -idq "./packaged/${BASE_NAME}.rar" "$RAW_FILE"
             rm -f "$RAW_FILE"
           else
-            echo "📦 Packaging into single password-protected zip file..."
-            7z a -tzip -mx=1 -p"ninten2.ir" "./packaged/${BASE_NAME}.zip" "$RAW_FILE"
+            echo "📦 Packaging into single password-protected RAR file..."
+            rar a -m0 -p"ninten2.ir" -ep1 -idq "./packaged/${BASE_NAME}.rar" "$RAW_FILE"
             rm -f "$RAW_FILE"
           fi
 
-          echo "Listing packaged parts:"
+          echo "Listing packaged RAR parts:"
           ls -lh ./packaged
 
       - name: ☁️ Upload All Parts to AbreHamrahi Cloud (Parallel 4x)
