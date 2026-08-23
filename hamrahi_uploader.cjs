@@ -150,11 +150,12 @@ async function getAccessToken(tokenInput) {
 /**
  * Resolve or create folder hierarchy recursively (e.g. "Nintendo_Switch/Zelda_TotK/Updates")
  */
-async function resolveFolderPath(accessToken, folderPath) {
+async function resolveFolderPath(accessToken, folderPath, refreshToken = null) {
     if (!folderPath || folderPath === '/' || folderPath === '.') return null;
 
     const parts = folderPath.split('/').map(p => p.trim()).filter(Boolean);
     let currentParentId = null;
+    let activeToken = accessToken;
 
     for (const folderName of parts) {
         // 1. List objects in current parent to check if folder already exists
@@ -162,15 +163,28 @@ async function resolveFolderPath(accessToken, folderPath) {
             ? `/api/v2/flat/list-objects/?parent=${currentParentId}` 
             : '/api/v2/flat/list-objects/';
 
-        const listRes = await request({
+        let listRes = await request({
             hostname: 'abrehamrahi.ir',
             path: listPath,
             method: 'GET',
             headers: {
-                'Authorization': `Bearer ${accessToken}`,
+                'Authorization': `Bearer ${activeToken}`,
                 'Accept': 'application/json'
             }
         });
+
+        if ((listRes.status === 401 || (listRes.body && listRes.body.code === 'token_not_valid')) && refreshToken) {
+            activeToken = await getAccessToken(refreshToken);
+            listRes = await request({
+                hostname: 'abrehamrahi.ir',
+                path: listPath,
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${activeToken}`,
+                    'Accept': 'application/json'
+                }
+            });
+        }
 
         let existingFolder = null;
         if (listRes.status === 200 && Array.isArray(listRes.body.results)) {
@@ -184,12 +198,12 @@ async function resolveFolderPath(accessToken, folderPath) {
         } else {
             // 2. Create new folder
             console.log(`📁 Creating folder "${folderName}" (Parent ID: ${currentParentId || 'Root'})...`);
-            const createRes = await request({
+            let createRes = await request({
                 hostname: 'abrehamrahi.ir',
                 path: '/api/v2/flat/create-folder/',
                 method: 'POST',
                 headers: {
-                    'Authorization': `Bearer ${accessToken}`,
+                    'Authorization': `Bearer ${activeToken}`,
                     'Content-Type': 'application/json',
                     'Accept': 'application/json'
                 }
@@ -197,6 +211,23 @@ async function resolveFolderPath(accessToken, folderPath) {
                 name: folderName,
                 parent: currentParentId
             });
+
+            if ((createRes.status === 401 || (createRes.body && createRes.body.code === 'token_not_valid')) && refreshToken) {
+                activeToken = await getAccessToken(refreshToken);
+                createRes = await request({
+                    hostname: 'abrehamrahi.ir',
+                    path: '/api/v2/flat/create-folder/',
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${activeToken}`,
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    }
+                }, {
+                    name: folderName,
+                    parent: currentParentId
+                });
+            }
 
             if (createRes.status === 200 || createRes.status === 201) {
                 currentParentId = createRes.body.id;
@@ -212,7 +243,7 @@ async function resolveFolderPath(accessToken, folderPath) {
 /**
  * Upload a local file to AbreHamrahi with progress indicator
  */
-async function uploadFileToHamrahi(accessToken, filePath, parentFolderId = null, customFileName = null) {
+async function uploadFileToHamrahi(accessToken, filePath, parentFolderId = null, customFileName = null, refreshToken = null) {
     if (!fs.existsSync(filePath)) {
         throw new Error(`File not found at: ${filePath}`);
     }
@@ -223,17 +254,49 @@ async function uploadFileToHamrahi(accessToken, filePath, parentFolderId = null,
 
     console.log(`\n🚀 Uploading "${fileName}" (${(fileSize / (1024 * 1024)).toFixed(2)} MB)...`);
 
+    let activeAccessToken = accessToken;
+
+    const refreshActiveToken = async () => {
+        if (refreshToken) {
+            try {
+                const refreshed = await getAccessToken(refreshToken);
+                if (refreshed) {
+                    activeAccessToken = refreshed;
+                    return refreshed;
+                }
+            } catch (e) {
+                console.warn(`⚠️ Token refresh failed: ${e.message}`);
+            }
+        }
+        return activeAccessToken;
+    };
+
     // 1. Start Upload
-    const startRes = await request({
+    let startRes = await request({
         hostname: 'abrehamrahi.ir',
         path: '/api/v2/flat/start-upload/',
         method: 'POST',
         headers: {
-            'Authorization': `Bearer ${accessToken}`,
+            'Authorization': `Bearer ${activeAccessToken}`,
             'Content-Type': 'application/json',
             'Accept': 'application/json'
         }
     }, { obj_size: fileSize });
+
+    if ((startRes.status === 401 || (startRes.body && startRes.body.code === 'token_not_valid')) && refreshToken) {
+        console.log('🔄 Token expired before start-upload. Refreshing token...');
+        await refreshActiveToken();
+        startRes = await request({
+            hostname: 'abrehamrahi.ir',
+            path: '/api/v2/flat/start-upload/',
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${activeAccessToken}`,
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            }
+        }, { obj_size: fileSize });
+    }
 
     if (startRes.status !== 200 && startRes.status !== 201) {
         throw new Error(`Start upload failed (HTTP ${startRes.status}): ${JSON.stringify(startRes.body)}`);
@@ -271,12 +334,19 @@ async function uploadFileToHamrahi(accessToken, filePath, parentFolderId = null,
 
     // 3. Complete Upload
     console.log('🔄 Finalizing upload with AbreHamrahi storage...');
-    const completeRes = await request({
+    
+    // Always refresh token before complete-upload if refreshToken is available, because uploading chunks for large files can take many minutes!
+    if (refreshToken) {
+        console.log('🔑 Refreshing access token before completing upload (protecting against expiration)...');
+        await refreshActiveToken();
+    }
+
+    let completeRes = await request({
         hostname: 'abrehamrahi.ir',
         path: '/api/v2/flat/complete-upload/',
         method: 'POST',
         headers: {
-            'Authorization': `Bearer ${accessToken}`,
+            'Authorization': `Bearer ${activeAccessToken}`,
             'Content-Type': 'application/json',
             'Accept': 'application/json'
         }
@@ -289,6 +359,28 @@ async function uploadFileToHamrahi(accessToken, filePath, parentFolderId = null,
         force_overwrite: false
     });
 
+    if ((completeRes.status === 401 || (completeRes.body && completeRes.body.code === 'token_not_valid')) && refreshToken) {
+        console.log('🔄 Access token expired. Refreshing token and retrying complete-upload...');
+        await refreshActiveToken();
+        completeRes = await request({
+            hostname: 'abrehamrahi.ir',
+            path: '/api/v2/flat/complete-upload/',
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${activeAccessToken}`,
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            }
+        }, {
+            key: key,
+            name: fileName,
+            parent: parentFolderId,
+            upload_id: upload_id,
+            parts: completedParts,
+            force_overwrite: false
+        });
+    }
+
     if (completeRes.status !== 200 && completeRes.status !== 201) {
         throw new Error(`Complete upload failed: ${JSON.stringify(completeRes.body)}`);
     }
@@ -298,18 +390,35 @@ async function uploadFileToHamrahi(accessToken, filePath, parentFolderId = null,
 
     // 4. Create Public Link
     console.log('🔗 Generating public download link...');
-    const linkRes = await request({
+    let linkRes = await request({
         hostname: 'abrehamrahi.ir',
         path: '/api/v2/sharing/public-link/create/',
         method: 'POST',
         headers: {
-            'Authorization': `Bearer ${accessToken}`,
+            'Authorization': `Bearer ${activeAccessToken}`,
             'Content-Type': 'application/json',
             'Accept': 'application/json'
         }
     }, {
         obj_id: uploadedFile.id
     });
+
+    if ((linkRes.status === 401 || (linkRes.body && linkRes.body.code === 'token_not_valid')) && refreshToken) {
+        console.log('🔄 Access token expired. Refreshing token and retrying public link creation...');
+        await refreshActiveToken();
+        linkRes = await request({
+            hostname: 'abrehamrahi.ir',
+            path: '/api/v2/sharing/public-link/create/',
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${activeAccessToken}`,
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            }
+        }, {
+            obj_id: uploadedFile.id
+        });
+    }
 
     const publicLink = linkRes.body && linkRes.body.link ? linkRes.body.link : uploadedFile.download_url;
 
@@ -356,9 +465,9 @@ async function main() {
         const accessToken = await getAccessToken(refreshToken);
 
         console.log(`🗂️ Resolving target folder: "${folderPath}"...`);
-        const folderId = await resolveFolderPath(accessToken, folderPath);
+        const folderId = await resolveFolderPath(accessToken, folderPath, refreshToken);
 
-        const result = await uploadFileToHamrahi(accessToken, filePath, folderId, customName);
+        const result = await uploadFileToHamrahi(accessToken, filePath, folderId, customName, refreshToken);
 
         console.log('\n=============================================');
         console.log('🎉 UPLOAD COMPLETE!');

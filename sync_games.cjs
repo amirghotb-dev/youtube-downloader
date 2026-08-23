@@ -398,10 +398,10 @@ async function run() {
                 const targetHamrahiFolder = `${gameFolderName}/${subFolder}`;
 
                 console.log(`    ☁️ Resolving AbreHamrahi folder: "${targetHamrahiFolder}"...`);
-                const folderId = await resolveFolderPath(currentAccessToken, targetHamrahiFolder);
+                const folderId = await resolveFolderPath(currentAccessToken, targetHamrahiFolder, REFRESH_TOKEN);
 
                 console.log(`    ☁️ Uploading to AbreHamrahi (${finalZipName})...`);
-                const uploadResult = await uploadFileToHamrahi(currentAccessToken, protectedZipPath, folderId, finalZipName);
+                const uploadResult = await uploadFileToHamrahi(currentAccessToken, protectedZipPath, folderId, finalZipName, REFRESH_TOKEN);
 
                 console.log(`    🎉 Upload Complete! Public Link: ${uploadResult.public_url}`);
 
