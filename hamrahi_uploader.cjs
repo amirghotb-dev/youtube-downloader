@@ -13,12 +13,29 @@ const CHUNK_SIZE = 5242880; // 5MB standard chunk size for AbreHamrahi
 
 function request(options, data = null, retries = 3) {
     return new Promise((resolve, reject) => {
+        let payload = null;
+        if (data !== null && data !== undefined) {
+            if (Buffer.isBuffer(data)) {
+                payload = data;
+            } else if (typeof data === 'string') {
+                payload = Buffer.from(data, 'utf-8');
+            } else {
+                payload = Buffer.from(JSON.stringify(data), 'utf-8');
+            }
+        }
+
+        const headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+            ...options.headers
+        };
+
+        if (payload) {
+            headers['Content-Length'] = payload.length;
+        }
+
         const req = https.request({
             ...options,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-                ...options.headers
-            }
+            headers
         }, (res) => {
             let body = '';
             res.on('data', chunk => body += chunk);
@@ -39,12 +56,8 @@ function request(options, data = null, retries = 3) {
                 reject(err);
             }
         });
-        if (data) {
-            if (Buffer.isBuffer(data) || typeof data === 'string') {
-                req.write(data);
-            } else {
-                req.write(JSON.stringify(data));
-            }
+        if (payload) {
+            req.write(payload);
         }
         req.end();
     });

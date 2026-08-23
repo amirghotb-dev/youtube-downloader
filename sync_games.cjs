@@ -125,17 +125,34 @@ function apiRequest(endpoint, method = 'GET', data = null) {
         const parsedUrl = new URL(urlStr);
         const protocol = parsedUrl.protocol === 'https:' ? https : http;
 
+        let payload = null;
+        if (data !== null && data !== undefined) {
+            if (Buffer.isBuffer(data)) {
+                payload = data;
+            } else if (typeof data === 'string') {
+                payload = Buffer.from(data, 'utf-8');
+            } else {
+                payload = Buffer.from(JSON.stringify(data), 'utf-8');
+            }
+        }
+
+        const headers = {
+            'X-SYNC-TOKEN': SYNC_TOKEN,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'User-Agent': 'Ninten2-GitHub-Sync-Worker/1.0'
+        };
+
+        if (payload) {
+            headers['Content-Length'] = payload.length;
+        }
+
         const reqOptions = {
             hostname: parsedUrl.hostname,
             port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
             path: parsedUrl.pathname + parsedUrl.search,
             method: method,
-            headers: {
-                'X-SYNC-TOKEN': SYNC_TOKEN,
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-                'User-Agent': 'Ninten2-GitHub-Sync-Worker/1.0'
-            },
+            headers: headers,
             rejectUnauthorized: false
         };
 
@@ -162,8 +179,8 @@ function apiRequest(endpoint, method = 'GET', data = null) {
 
         req.on('error', reject);
 
-        if (data) {
-            req.write(JSON.stringify(data));
+        if (payload) {
+            req.write(payload);
         }
 
         req.end();
