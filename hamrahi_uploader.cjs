@@ -241,6 +241,95 @@ async function resolveFolderPath(accessToken, folderPath, refreshToken = null) {
 }
 
 /**
+ * Check if a file already exists in a given folder in AbreHamrahi and retrieve its public download link
+ */
+async function findExistingFileInHamrahi(accessToken, folderId, fileName, refreshToken = null) {
+    if (!fileName) return null;
+    let activeToken = accessToken;
+
+    const listPath = folderId 
+        ? `/api/v2/flat/list-objects/?parent=${folderId}` 
+        : '/api/v2/flat/list-objects/';
+
+    let listRes = await request({
+        hostname: 'abrehamrahi.ir',
+        path: listPath,
+        method: 'GET',
+        headers: {
+            'Authorization': `Bearer ${activeToken}`,
+            'Accept': 'application/json'
+        }
+    });
+
+    if ((listRes.status === 401 || (listRes.body && listRes.body.code === 'token_not_valid')) && refreshToken) {
+        activeToken = await getAccessToken(refreshToken);
+        listRes = await request({
+            hostname: 'abrehamrahi.ir',
+            path: listPath,
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${activeToken}`,
+                'Accept': 'application/json'
+            }
+        });
+    }
+
+    if (listRes.status === 200 && Array.isArray(listRes.body.results)) {
+        const found = listRes.body.results.find(
+            item => item.type === 'file' && item.name.toLowerCase() === fileName.toLowerCase()
+        );
+
+        if (found) {
+            console.log(`    ⚡ File "${fileName}" already exists in AbreHamrahi (ID: ${found.id}). Reusing existing file...`);
+            
+            // Get public link
+            let linkRes = await request({
+                hostname: 'abrehamrahi.ir',
+                path: '/api/v2/sharing/public-link/create/',
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${activeToken}`,
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                }
+            }, {
+                obj_id: found.id
+            });
+
+            if ((linkRes.status === 401 || (linkRes.body && linkRes.body.code === 'token_not_valid')) && refreshToken) {
+                activeToken = await getAccessToken(refreshToken);
+                linkRes = await request({
+                    hostname: 'abrehamrahi.ir',
+                    path: '/api/v2/sharing/public-link/create/',
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${activeToken}`,
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    }
+                }, {
+                    obj_id: found.id
+                });
+            }
+
+            const publicLink = linkRes.body && linkRes.body.link ? linkRes.body.link : (found.download_url || '');
+
+            return {
+                id: found.id,
+                name: found.name,
+                size: found.size || 0,
+                public_url: publicLink,
+                download_url: found.download_url || publicLink,
+                folder_id: folderId,
+                reused: true
+            };
+        }
+    }
+
+    return null;
+}
+
+/**
  * Upload a local file to AbreHamrahi with progress indicator
  */
 async function uploadFileToHamrahi(accessToken, filePath, parentFolderId = null, customFileName = null, refreshToken = null) {
@@ -497,5 +586,6 @@ if (require.main === module) {
 module.exports = {
     getAccessToken,
     resolveFolderPath,
+    findExistingFileInHamrahi,
     uploadFileToHamrahi
 };

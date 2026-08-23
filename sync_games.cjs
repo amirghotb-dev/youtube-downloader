@@ -30,6 +30,7 @@ const {
 const {
     getAccessToken,
     resolveFolderPath,
+    findExistingFileInHamrahi,
     uploadFileToHamrahi
 } = require('./hamrahi_uploader.cjs');
 
@@ -188,9 +189,45 @@ function apiRequest(endpoint, method = 'GET', data = null) {
 }
 
 /**
+ * Resolve any HTTP 301/302 redirects to find the ultimate direct storage download URL
+ */
+async function resolveFinalRedirectUrl(initialUrl, maxRedirects = 5) {
+    let currentUrl = initialUrl;
+    for (let i = 0; i < maxRedirects; i++) {
+        try {
+            const parsed = new URL(currentUrl);
+            const protocol = parsed.protocol === 'https:' ? https : http;
+            const res = await new Promise((resolve, reject) => {
+                const req = protocol.request(currentUrl, {
+                    method: 'GET',
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Range': 'bytes=0-10'
+                    }
+                }, resolve);
+                req.on('error', reject);
+                req.setTimeout(6000, () => { req.destroy(); resolve(null); });
+                req.end();
+            });
+
+            if (res && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                currentUrl = new URL(res.headers.location, currentUrl).href;
+            } else {
+                break;
+            }
+        } catch (e) {
+            break;
+        }
+    }
+    return currentUrl;
+}
+
+/**
  * Download a file via aria2c (if available) or fallback to internal stream downloader
  */
 async function downloadRomFile(url, targetPath) {
+    const finalUrl = await resolveFinalRedirectUrl(url);
+
     // Check if aria2c is installed
     let hasAria2 = false;
     try {
@@ -202,17 +239,32 @@ async function downloadRomFile(url, targetPath) {
         console.log(`    ⚡ Downloading with aria2c (16 connections)...`);
         const targetDir = path.dirname(targetPath);
         const targetFile = path.basename(targetPath);
-        const cmd = `aria2c -x 16 -s 16 -k 1M --file-allocation=none --dir="${targetDir}" --out="${targetFile}" "${url}"`;
-        execSync(cmd, { stdio: 'inherit' });
-        const stats = fs.statSync(targetPath);
-        return {
-            destPath: targetPath,
-            totalBytes: stats.size
-        };
-    } else {
+        try {
+            const cmd = `aria2c -x 16 -s 16 -k 1M --allow-overwrite=true --auto-file-renaming=false --file-allocation=none --dir="${targetDir}" --out="${targetFile}" "${finalUrl}"`;
+            execSync(cmd, { stdio: 'inherit' });
+        } catch (ariaErr) {
+            console.warn(`    ⚠️ aria2c encountered an issue, falling back to direct stream download...`);
+        }
+
+        if (fs.existsSync(targetPath)) {
+            const stats = fs.statSync(targetPath);
+            // Check if downloaded file is accidentally an HTML error/redirect page
+            if (stats.size < 150 * 1024) {
+                try {
+                    const sample = fs.readFileSync(targetPath, 'utf8').substring(0, 500);
+                    if (sample.includes('<html') || sample.includes('<!DOCTYPE') || sample.includes('Redirecting') || sample.includes('Cloudflare')) {
+                        console.warn(`    ⚠️ Downloaded file is an HTML redirect/error page (${stats.size} bytes). Re-downloading with stream...`);
+                        fs.unlinkSync(targetPath);
+                    }
+                } catch {}
+            }
+        }
+    }
+
+    if (!fs.existsSync(targetPath)) {
         console.log(`    📥 Downloading via Node.js high-speed stream...`);
         let lastRender = 0;
-        return await downloadFile(url, targetPath, {
+        return await downloadFile(finalUrl, targetPath, {
             onProgress: (prog) => {
                 const now = Date.now();
                 if (now - lastRender >= 300 || prog.percentage === 100) {
@@ -226,6 +278,12 @@ async function downloadRomFile(url, targetPath) {
             }
         });
     }
+
+    const finalStats = fs.statSync(targetPath);
+    return {
+        destPath: targetPath,
+        totalBytes: finalStats.size
+    };
 }
 
 /**
@@ -372,77 +430,92 @@ async function run() {
                 console.log(`    Type:   ${fileItem.type} | Format: ${fileItem.format || 'NSP'}`);
                 console.log(`    Source: ${fileItem.directUrl}`);
 
-                // Step A: Determine clean final filename for the game archive
                 const finalZipName = generateRomFilename(gameData.title, fileItem, '.zip');
-                const tempExt = fileItem.format ? `.${fileItem.format.toLowerCase()}` : '.nsp';
-                const tempDownloadName = `temp_${Date.now()}_${cleanFolderName(gameData.title)}_${i + 1}${tempExt}`;
-                const tempLocalFilePath = path.join(DEST_DIR, tempDownloadName);
-
-                // Step B: Download file locally
-                console.log(`    Saving temporary download to: ${tempLocalFilePath}`);
-                const dlResult = await downloadRomFile(fileItem.directUrl, tempLocalFilePath);
-                console.log(`\n    ✅ Downloaded successfully: ${formatBytes(dlResult.totalBytes)}`);
-
-                // Step C: Package & encrypt into password-protected zip file
-                const protectedZipPath = path.join(DEST_DIR, finalZipName);
-                console.log(`    🔒 Packaging into protected Zip with password '${ZIP_PASSWORD}' -> ${finalZipName}...`);
-                createProtectedZip(tempLocalFilePath, protectedZipPath, ZIP_PASSWORD);
-                const zipStats = fs.statSync(protectedZipPath);
-                console.log(`    ✅ Protected Zip ready: ${formatBytes(zipStats.size)}`);
-
-                // Step D: Upload to AbreHamrahi Cloud
-                console.log(`    🔑 Refreshing AbreHamrahi access token...`);
-                const currentAccessToken = await getAccessToken(REFRESH_TOKEN);
-
                 const subFolder = fileItem.type === 'Base Game' ? 'Base_Game' : (fileItem.type === 'Update' ? 'Updates' : 'DLC');
                 const targetHamrahiFolder = `${gameFolderName}/${subFolder}`;
 
-                console.log(`    ☁️ Resolving AbreHamrahi folder: "${targetHamrahiFolder}"...`);
-                const folderId = await resolveFolderPath(currentAccessToken, targetHamrahiFolder, REFRESH_TOKEN);
+                try {
+                    console.log(`    🔑 Refreshing AbreHamrahi access token...`);
+                    const currentAccessToken = await getAccessToken(REFRESH_TOKEN);
 
-                console.log(`    ☁️ Uploading to AbreHamrahi (${finalZipName})...`);
-                const uploadResult = await uploadFileToHamrahi(currentAccessToken, protectedZipPath, folderId, finalZipName, REFRESH_TOKEN);
+                    console.log(`    ☁️ Resolving AbreHamrahi folder: "${targetHamrahiFolder}"...`);
+                    const folderId = await resolveFolderPath(currentAccessToken, targetHamrahiFolder, REFRESH_TOKEN);
 
-                console.log(`    🎉 Upload Complete! Public Link: ${uploadResult.public_url}`);
+                    // Check if file already exists in AbreHamrahi
+                    let uploadResult = await findExistingFileInHamrahi(currentAccessToken, folderId, finalZipName, REFRESH_TOKEN);
 
-                // Step E: Clean up temporary local files
-                if (fs.existsSync(tempLocalFilePath)) {
-                    fs.unlinkSync(tempLocalFilePath);
+                    if (!uploadResult) {
+                        // Step A: Determine clean temp filename
+                        const tempExt = fileItem.format ? `.${fileItem.format.toLowerCase()}` : '.nsp';
+                        const tempDownloadName = `temp_${Date.now()}_${cleanFolderName(gameData.title)}_${i + 1}${tempExt}`;
+                        const tempLocalFilePath = path.join(DEST_DIR, tempDownloadName);
+
+                        // Step B: Download file locally
+                        console.log(`    Saving temporary download to: ${tempLocalFilePath}`);
+                        const dlResult = await downloadRomFile(fileItem.directUrl, tempLocalFilePath);
+                        console.log(`\n    ✅ Downloaded successfully: ${formatBytes(dlResult.totalBytes)}`);
+
+                        // Step C: Package & encrypt into password-protected zip file
+                        const protectedZipPath = path.join(DEST_DIR, finalZipName);
+                        console.log(`    🔒 Packaging into protected Zip with password '${ZIP_PASSWORD}' -> ${finalZipName}...`);
+                        createProtectedZip(tempLocalFilePath, protectedZipPath, ZIP_PASSWORD);
+                        const zipStats = fs.statSync(protectedZipPath);
+                        console.log(`    ✅ Protected Zip ready: ${formatBytes(zipStats.size)}`);
+
+                        // Step D: Upload to AbreHamrahi Cloud
+                        console.log(`    ☁️ Uploading to AbreHamrahi (${finalZipName})...`);
+                        uploadResult = await uploadFileToHamrahi(currentAccessToken, protectedZipPath, folderId, finalZipName, REFRESH_TOKEN);
+                        console.log(`    🎉 Upload Complete! Public Link: ${uploadResult.public_url}`);
+
+                        // Step E: Clean up temporary local files
+                        if (fs.existsSync(tempLocalFilePath)) {
+                            fs.unlinkSync(tempLocalFilePath);
+                        }
+                        if (fs.existsSync(protectedZipPath)) {
+                            fs.unlinkSync(protectedZipPath);
+                            console.log(`    🧹 Cleaned up temporary local files: ${finalZipName}`);
+                        }
+                    } else {
+                        console.log(`    ⚡ Reusing existing upload: ${uploadResult.public_url}`);
+                    }
+
+                    // Step F: Record file metadata
+                    let fileTypeKey = 'base_game';
+                    if (fileItem.type === 'Update') fileTypeKey = 'update';
+                    else if (fileItem.type === 'DLC') fileTypeKey = 'dlc';
+
+                    let displayTitle = `${cleanGameTitle(gameData.title).replace(/_/g, ' ')}`;
+                    if (fileItem.type === 'Base Game') {
+                        displayTitle += ' - نسخه اصلی بازی';
+                    } else if (fileItem.type === 'Update') {
+                        displayTitle += ` - آپدیت ${fileItem.version || ''}`.trim();
+                    } else if (fileItem.type === 'DLC') {
+                        displayTitle += ' - بسته الحاقی (DLC)';
+                    }
+
+                    uploadedFiles.push({
+                        file_type: fileTypeKey,
+                        title: finalZipName,
+                        display_title: displayTitle,
+                        version: fileItem.version || 'v1.0.0',
+                        file_size: formatBytes(uploadResult.size),
+                        file_format: 'ZIP',
+                        password: ZIP_PASSWORD,
+                        part_number: 1,
+                        total_parts: 1,
+                        server_name: 'سرور اختصاصی مستقیم ابر همراهی (نیم‌بها)',
+                        download_url: uploadResult.public_url,
+                        folder_path: targetHamrahiFolder,
+                        hamrahi_id: uploadResult.id,
+                    });
+
+                } catch (fileErr) {
+                    console.error(`\n    ⚠️ Warning: Failed processing file ${fileItem.name}: ${fileErr.message}`);
                 }
-                if (fs.existsSync(protectedZipPath)) {
-                    fs.unlinkSync(protectedZipPath);
-                    console.log(`    🧹 Cleaned up temporary local files: ${finalZipName}`);
-                }
+            }
 
-                // Step F: Record file metadata
-                let fileTypeKey = 'base_game';
-                if (fileItem.type === 'Update') fileTypeKey = 'update';
-                else if (fileItem.type === 'DLC') fileTypeKey = 'dlc';
-
-                let displayTitle = `${cleanGameTitle(gameData.title).replace(/_/g, ' ')}`;
-                if (fileItem.type === 'Base Game') {
-                    displayTitle += ' - نسخه اصلی بازی';
-                } else if (fileItem.type === 'Update') {
-                    displayTitle += ` - آپدیت ${fileItem.version || ''}`.trim();
-                } else if (fileItem.type === 'DLC') {
-                    displayTitle += ' - بسته الحاقی (DLC)';
-                }
-
-                uploadedFiles.push({
-                    file_type: fileTypeKey,
-                    title: finalZipName,
-                    display_title: displayTitle,
-                    version: fileItem.version || 'v1.0.0',
-                    file_size: formatBytes(uploadResult.size),
-                    file_format: 'ZIP',
-                    password: ZIP_PASSWORD,
-                    part_number: 1,
-                    total_parts: 1,
-                    server_name: 'سرور اختصاصی مستقیم ابر همراهی (نیم‌بها)',
-                    download_url: uploadResult.public_url,
-                    folder_path: targetHamrahiFolder,
-                    hamrahi_id: uploadResult.id,
-                });
+            if (uploadedFiles.length === 0) {
+                throw new Error('No files were successfully processed or uploaded for this game.');
             }
 
             // 5. Complete task in Website API
@@ -474,7 +547,7 @@ async function run() {
                 console.log(`✅ API response: ${completeRes.message || 'Complete!'}`);
             }
 
-            console.log(`\n🎉 Queue Item #${item.id} (${gameData.title}) completed successfully!`);
+            console.log(`\n🎉 Queue Item #${item.id} (${gameData.title}) completed successfully with ${uploadedFiles.length} file(s)!`);
 
         } catch (taskErr) {
             console.error(`\n❌ Error processing game ${item.nswpedia_url}: ${taskErr.message}`);
