@@ -148,10 +148,13 @@ async function downloadRomFile(url, targetPath) {
  * Clean and format clean directory folder name
  */
 function cleanFolderName(title) {
-    return (title || 'Nintendo_Switch_Game')
+    let clean = (title || 'Nintendo_Switch_Game')
+        .replace(/^Download\s+/i, '')
+        .replace(/\s*(?:NSP|XCI|NSZ|Full Game|\+ Update|Update|DLC|Homebrew Port|Homebrew|Port|v\d+[\.\d]*)\b/gi, '')
         .replace(/[^a-zA-Z0-9_\- ]/g, '')
         .trim()
         .replace(/\s+/g, '_');
+    return clean || 'Nintendo_Switch_Game';
 }
 
 /**
@@ -281,15 +284,18 @@ async function run() {
                 const dlResult = await downloadRomFile(fileItem.directUrl, localFilePath);
                 console.log(`\n    ✅ Downloaded successfully: ${formatBytes(dlResult.totalBytes)}`);
 
-                // Step B: Upload to AbreHamrahi Cloud
+                // Step B: Upload to AbreHamrahi Cloud (Refresh token right before uploading to avoid expiration during long downloads)
+                console.log(`    🔑 Refreshing AbreHamrahi access token...`);
+                const currentAccessToken = await getAccessToken(REFRESH_TOKEN);
+
                 const subFolder = fileItem.type === 'Base Game' ? 'Base_Game' : (fileItem.type === 'Update' ? 'Updates' : 'DLC');
                 const targetHamrahiFolder = `${gameFolderName}/${subFolder}`;
 
                 console.log(`    ☁️ Resolving AbreHamrahi folder: "${targetHamrahiFolder}"...`);
-                const folderId = await resolveFolderPath(accessToken, targetHamrahiFolder);
+                const folderId = await resolveFolderPath(currentAccessToken, targetHamrahiFolder);
 
                 console.log(`    ☁️ Uploading to AbreHamrahi...`);
-                const uploadResult = await uploadFileToHamrahi(accessToken, localFilePath, folderId, safeName);
+                const uploadResult = await uploadFileToHamrahi(currentAccessToken, localFilePath, folderId, safeName);
 
                 console.log(`    🎉 Upload Complete! Public Link: ${uploadResult.public_url}`);
 
