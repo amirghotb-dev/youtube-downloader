@@ -429,12 +429,12 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
 
     // Check if initial URL is a /download/ page or a main article page
     const isDownloadUrl = gameUrl.includes('/download/');
-    const canonicalMatch = initialHtml.match(/<link\s+rel=['"]canonical['"]\s+href=['"](https:\/\/nswpedia\.com\/nintendo-switch-roms\/[^'"]+)['"]/i);
 
-    if (isDownloadUrl || canonicalMatch) {
+    if (isDownloadUrl) {
         downloadPageUrl = gameUrl;
         dlHtml = initialHtml;
 
+        const canonicalMatch = initialHtml.match(/<link\s+rel=['"]canonical['"]\s+href=['"](https:\/\/nswpedia\.com\/nintendo-switch-roms\/[^'"]+)['"]/i);
         if (canonicalMatch) {
             canonicalGameUrl = canonicalMatch[1];
             try {
