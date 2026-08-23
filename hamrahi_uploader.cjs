@@ -11,9 +11,15 @@ const path = require('path');
 
 const CHUNK_SIZE = 5242880; // 5MB standard chunk size for AbreHamrahi
 
-function request(options, data = null) {
+function request(options, data = null, retries = 3) {
     return new Promise((resolve, reject) => {
-        const req = https.request(options, (res) => {
+        const req = https.request({
+            ...options,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+                ...options.headers
+            }
+        }, (res) => {
             let body = '';
             res.on('data', chunk => body += chunk);
             res.on('end', () => {
@@ -24,7 +30,15 @@ function request(options, data = null) {
                 }
             });
         });
-        req.on('error', reject);
+        req.on('error', (err) => {
+            if (retries > 0) {
+                setTimeout(() => {
+                    resolve(request(options, data, retries - 1));
+                }, 1500);
+            } else {
+                reject(err);
+            }
+        });
         if (data) {
             if (Buffer.isBuffer(data) || typeof data === 'string') {
                 req.write(data);
@@ -77,7 +91,35 @@ function putChunk(urlStr, buffer, retries = 3) {
     });
 }
 
-async function getAccessToken(refreshToken) {
+async function getAccessToken(tokenInput) {
+    if (!tokenInput) {
+        throw new Error('Missing token input in getAccessToken');
+    }
+
+    let refreshToken = tokenInput;
+
+    // Check if user passed the full JSON response or quoted string
+    if (typeof tokenInput === 'string') {
+        let cleaned = tokenInput.trim();
+        if ((cleaned.startsWith("'") && cleaned.endsWith("'")) || (cleaned.startsWith('"') && cleaned.endsWith('"'))) {
+            cleaned = cleaned.slice(1, -1).trim();
+        }
+        if (cleaned.startsWith('{') && cleaned.endsWith('}')) {
+            try {
+                const parsed = JSON.parse(cleaned);
+                if (parsed.refresh) {
+                    refreshToken = parsed.refresh;
+                } else if (parsed.access) {
+                    refreshToken = parsed.access;
+                }
+            } catch (e) {}
+        } else {
+            refreshToken = cleaned;
+        }
+    } else if (typeof tokenInput === 'object' && tokenInput !== null && tokenInput.refresh) {
+        refreshToken = tokenInput.refresh;
+    }
+
     const res = await request({
         hostname: 'abrehamrahi.ir',
         path: '/api/v2/profile/auth/token-refresh/',
