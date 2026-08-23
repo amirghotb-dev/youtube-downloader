@@ -441,10 +441,23 @@ async function run() {
                     console.log(`    ☁️ Resolving AbreHamrahi folder: "${targetHamrahiFolder}"...`);
                     const folderId = await resolveFolderPath(currentAccessToken, targetHamrahiFolder, REFRESH_TOKEN);
 
+                    // Candidate filenames to check in AbreHamrahi before downloading
+                    const candidateNames = [
+                        finalZipName,
+                        fileItem.name,
+                        finalZipName.replace(/\.zip$/i, '.nsp'),
+                        finalZipName.replace(/\.zip$/i, '.xci'),
+                        fileItem.name.replace(/\.[a-zA-Z0-9]+$/, '') + '.zip',
+                        `${cleanFolderName(gameData.title)}_${subFolder}.zip`,
+                        `${cleanFolderName(gameData.title)}.zip`
+                    ];
+
                     // Check if file already exists in AbreHamrahi
-                    let uploadResult = await findExistingFileInHamrahi(currentAccessToken, folderId, finalZipName, REFRESH_TOKEN);
+                    console.log(`    🔍 Checking if file already exists on AbreHamrahi Cloud...`);
+                    let uploadResult = await findExistingFileInHamrahi(currentAccessToken, folderId, candidateNames, REFRESH_TOKEN);
 
                     if (!uploadResult) {
+                        console.log(`    📥 File not found in cloud. Starting download from source: ${fileItem.directUrl}`);
                         // Step A: Determine clean temp filename
                         const tempExt = fileItem.format ? `.${fileItem.format.toLowerCase()}` : '.nsp';
                         const tempDownloadName = `temp_${Date.now()}_${cleanFolderName(gameData.title)}_${i + 1}${tempExt}`;
@@ -476,7 +489,7 @@ async function run() {
                             console.log(`    🧹 Cleaned up temporary local files: ${finalZipName}`);
                         }
                     } else {
-                        console.log(`    ⚡ Reusing existing upload: ${uploadResult.public_url}`);
+                        console.log(`    ⚡ [CACHE HIT] Reusing existing cloud file without re-downloading: ${uploadResult.public_url}`);
                     }
 
                     // Step F: Record file metadata

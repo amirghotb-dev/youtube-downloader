@@ -242,14 +242,21 @@ async function resolveFolderPath(accessToken, folderPath, refreshToken = null) {
 
 /**
  * Check if a file already exists in a given folder in AbreHamrahi and retrieve its public download link
+ * Supports single filename or array of candidate filenames / fuzzy matches
  */
-async function findExistingFileInHamrahi(accessToken, folderId, fileName, refreshToken = null) {
-    if (!fileName) return null;
+async function findExistingFileInHamrahi(accessToken, folderId, fileNames, refreshToken = null) {
+    if (!fileNames) return null;
     let activeToken = accessToken;
 
+    const candidateList = (Array.isArray(fileNames) ? fileNames : [fileNames])
+        .filter(Boolean)
+        .map(name => name.toLowerCase().trim());
+
+    if (candidateList.length === 0) return null;
+
     const listPath = folderId 
-        ? `/api/v2/flat/list-objects/?parent=${folderId}` 
-        : '/api/v2/flat/list-objects/';
+        ? `/api/v2/flat/list-objects/?parent=${folderId}&page_size=100` 
+        : '/api/v2/flat/list-objects/?page_size=100';
 
     let listRes = await request({
         hostname: 'abrehamrahi.ir',
@@ -275,14 +282,32 @@ async function findExistingFileInHamrahi(accessToken, folderId, fileName, refres
     }
 
     if (listRes.status === 200 && Array.isArray(listRes.body.results)) {
-        const found = listRes.body.results.find(
-            item => item.type === 'file' && item.name.toLowerCase() === fileName.toLowerCase()
-        );
+        const filesInFolder = listRes.body.results.filter(item => item.type === 'file');
+
+        // 1. Exact match on any candidate name
+        let found = filesInFolder.find(item => candidateList.includes(item.name.toLowerCase()));
+
+        // 2. Fuzzy match: same base name without extension
+        if (!found) {
+            found = filesInFolder.find(item => {
+                const itemBase = item.name.replace(/\.[a-zA-Z0-9]+$/, '').toLowerCase();
+                return candidateList.some(cand => {
+                    const candBase = cand.replace(/\.[a-zA-Z0-9]+$/, '').toLowerCase();
+                    return itemBase === candBase || itemBase.includes(candBase) || candBase.includes(itemBase);
+                });
+            });
+        }
+
+        // 3. If only 1 file in this specific subfolder, reuse it
+        if (!found && filesInFolder.length === 1) {
+            found = filesInFolder[0];
+        }
 
         if (found) {
-            console.log(`    ⚡ File "${fileName}" already exists in AbreHamrahi (ID: ${found.id}). Reusing existing file...`);
-            
-            // Get public link
+            console.log(`    ⚡ [CACHE HIT] File "${found.name}" already exists in AbreHamrahi (ID: ${found.id}).`);
+            console.log(`    ⏩ Skipping download & packaging - retrieving direct public download link...`);
+
+            // Get or create public link
             let linkRes = await request({
                 hostname: 'abrehamrahi.ir',
                 path: '/api/v2/sharing/public-link/create/',

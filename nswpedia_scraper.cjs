@@ -342,35 +342,149 @@ async function resolveDirectDownloadLink(downloadListUrl) {
 }
 
 /**
+ * Clean and format human-readable game title
+ */
+function sanitizeDisplayTitle(rawTitle) {
+    if (!rawTitle) return '';
+    let title = stripHtml(rawTitle);
+
+    // Remove "Download " prefix
+    title = title.replace(/^\s*Download\s+/i, '');
+
+    // Remove site brand if present
+    title = title.replace(/\s*[-–|]\s*NSWpedia(?:\.com)?\s*$/i, '');
+    title = title.replace(/^NSWpedia(?:\.com)?\s*[-–|:]*\s*/i, '');
+
+    // Remove ROM terms, formats, versions, updates, DLC suffixes
+    title = title.replace(/\s*\(?(?:NSP|XCI|NSZ)(?:\/(?:NSP|XCI|NSZ))?\)?\s*(?:\+\s*Update|\+\s*DLC|Full Game|Update|DLC|v\d+[\.\d]*|\bROM\b|Base Game).*/gi, '');
+    title = title.replace(/\s*\(?(?:NSP|XCI|NSZ)\)?\s*$/gi, '');
+    title = title.replace(/\s*\+\s*(?:Update|DLC).*/gi, '');
+    title = title.replace(/\s*v\d+[\.\d]*\s*$/gi, '');
+
+    // Trim trailing punctuation like colons, hyphens, pluses, slashes, or whitespace
+    title = title.replace(/[\s\-_:+/]+$/, '').trim();
+
+    return title;
+}
+
+/**
+ * Extract clean game title from HTML
+ */
+function extractGameTitle(html, fallbackSlug = '') {
+    if (!html) return '';
+
+    // 1. Check all <h1> tags in html, filtering out logo / NSWpedia headers
+    const h1Regex = /<h1[^>]*>([\s\S]*?)<\/h1>/gi;
+    let match;
+    while ((match = h1Regex.exec(html)) !== null) {
+        const text = stripHtml(match[1]).trim();
+        if (text && !/nswpedia/i.test(text)) {
+            const cleaned = sanitizeDisplayTitle(text);
+            if (cleaned && cleaned.length >= 2 && !/nswpedia/i.test(cleaned)) {
+                return cleaned;
+            }
+        }
+    }
+
+    // 2. Check <meta property="og:title">
+    const ogTitleMatch = html.match(/<meta\s+property=['"]og:title['"]\s+content=['"]([^'"]+)['"]/i) ||
+                         html.match(/<meta\s+content=['"]([^'"]+)['"]\s+property=['"]og:title['"]/i);
+    if (ogTitleMatch) {
+        const cleaned = sanitizeDisplayTitle(ogTitleMatch[1]);
+        if (cleaned && cleaned.length >= 2 && !/nswpedia/i.test(cleaned)) {
+            return cleaned;
+        }
+    }
+
+    // 3. Check <title> tag
+    const titleTagMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    if (titleTagMatch) {
+        const cleaned = sanitizeDisplayTitle(titleTagMatch[1]);
+        if (cleaned && cleaned.length >= 2 && !/nswpedia/i.test(cleaned)) {
+            return cleaned;
+        }
+    }
+
+    // 4. Fallback: Parse from slug
+    if (fallbackSlug) {
+        let cleanSlug = fallbackSlug.replace(/-\d+$/, ''); // remove trailing numeric IDs
+        cleanSlug = cleanSlug.replace(/(?:-switch-nsp-xci|-nsp-xci|-switch|-nsp|-xci)$/i, '');
+        return cleanSlug.replace(/[-_]/g, ' ').replace(/\b\w/g, l => l.toUpperCase()).trim();
+    }
+
+    return '';
+}
+
+/**
  * Scrape complete game page, including all metadata and direct download mirrors
  */
 async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency: 5 }) {
     const res = await fetchUrl(gameUrl);
-    const html = res.body;
+    const initialHtml = res.body;
 
-    // 1. Title
-    const h1Match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
-    const title = h1Match ? stripHtml(h1Match[1]) : '';
+    let mainHtml = initialHtml;
+    let dlHtml = initialHtml;
+    let canonicalGameUrl = gameUrl;
+    let downloadPageUrl = null;
+
+    // Check if initial URL is a /download/ page or a main article page
+    const isDownloadUrl = gameUrl.includes('/download/');
+    const canonicalMatch = initialHtml.match(/<link\s+rel=['"]canonical['"]\s+href=['"](https:\/\/nswpedia\.com\/nintendo-switch-roms\/[^'"]+)['"]/i);
+
+    if (isDownloadUrl || canonicalMatch) {
+        downloadPageUrl = gameUrl;
+        dlHtml = initialHtml;
+
+        if (canonicalMatch) {
+            canonicalGameUrl = canonicalMatch[1];
+            try {
+                const mainRes = await fetchUrl(canonicalGameUrl, { referer: gameUrl });
+                if (mainRes && mainRes.body) {
+                    mainHtml = mainRes.body;
+                }
+            } catch (err) {
+                // Keep initialHtml as fallback
+            }
+        }
+    } else {
+        // We are on the main game article page
+        const dlBtnMatch = mainHtml.match(/<a[^>]+href=['"](https:\/\/nswpedia\.com\/download\/[^'"]+)['"][^>]*>/i);
+        if (dlBtnMatch) {
+            downloadPageUrl = dlBtnMatch[1];
+            try {
+                const dlRes = await fetchUrl(downloadPageUrl, { referer: gameUrl });
+                if (dlRes && dlRes.body) {
+                    dlHtml = dlRes.body;
+                }
+            } catch (err) {
+                // Keep initialHtml as fallback
+            }
+        }
+    }
+
+    // 1. Extract Clean Title
+    const fallbackSlug = gameUrl.split('/').filter(Boolean).pop() || '';
+    const title = extractGameTitle(mainHtml, fallbackSlug) || extractGameTitle(dlHtml, fallbackSlug) || 'Nintendo Switch Game';
 
     // 2. Info Block Metadata (Title ID, Firmware, Release Date, Publisher)
     let titleId = null;
-    const tidMatch = html.match(/Title ID<\/span>\s*<span[^>]*>([0-9A-Fa-f]{16})<\/span>/i) ||
-                     html.match(/Title ID[^<]*<\/span>[\s\S]*?<span[^>]*>([0-9A-Fa-f]{16})<\/span>/i);
+    const tidMatch = mainHtml.match(/Title ID<\/span>\s*<span[^>]*>([0-9A-Fa-f]{16})<\/span>/i) ||
+                     mainHtml.match(/Title ID[^<]*<\/span>[\s\S]*?<span[^>]*>([0-9A-Fa-f]{16})<\/span>/i);
     if (tidMatch) titleId = tidMatch[1].trim();
 
     let releaseDate = null;
-    const rdMatch = html.match(/Release Date<\/span>\s*<span[^>]*>([^<]+)<\/span>/i) ||
-                    html.match(/Release Date[^<]*<\/span>[\s\S]*?<span[^>]*>([^<]+)<\/span>/i);
+    const rdMatch = mainHtml.match(/Release Date<\/span>\s*<span[^>]*>([^<]+)<\/span>/i) ||
+                    mainHtml.match(/Release Date[^<]*<\/span>[\s\S]*?<span[^>]*>([^<]+)<\/span>/i);
     if (rdMatch) releaseDate = stripHtml(rdMatch[1]);
 
     let requiredFirmware = null;
-    const fwMatch = html.match(/Required Firmware<\/span>\s*<span[^>]*>([^<]+)<\/span>/i) ||
-                    html.match(/Required Firmware[^<]*<\/span>[\s\S]*?<span[^>]*>([^<]+)<\/span>/i);
+    const fwMatch = mainHtml.match(/Required Firmware<\/span>\s*<span[^>]*>([^<]+)<\/span>/i) ||
+                    mainHtml.match(/Required Firmware[^<]*<\/span>[\s\S]*?<span[^>]*>([^<]+)<\/span>/i);
     if (fwMatch) requiredFirmware = stripHtml(fwMatch[1]);
 
     let publisher = null;
-    const pubMatch = html.match(/Published by<\/span>\s*<span[^>]*>([\s\S]*?)<\/span>/i) ||
-                     html.match(/Published by[^<]*<\/span>[\s\S]*?<span[^>]*>([\s\S]*?)<\/span>/i);
+    const pubMatch = mainHtml.match(/Published by<\/span>\s*<span[^>]*>([\s\S]*?)<\/span>/i) ||
+                     mainHtml.match(/Published by[^<]*<\/span>[\s\S]*?<span[^>]*>([\s\S]*?)<\/span>/i);
     if (pubMatch) publisher = stripHtml(pubMatch[1]);
 
     // 3. Cover Boxart & Banner
@@ -378,8 +492,9 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
     let banner = null;
 
     // Check main post thumbnail image (handle any attribute order)
-    const postImgMatch = html.match(/<img\b[^>]*\bclass=['"][^'"]*(?:wp-post-image|attachment-post-thumbnail|attachment-thumbnail)[^'"]*['"][^>]*\bsrc=['"]([^'"]+)['"]/i) ||
-                         html.match(/<img\b[^>]*\bsrc=['"]([^'"]+)['"][^>]*\bclass=['"][^'"]*(?:wp-post-image|attachment-post-thumbnail|attachment-thumbnail)[^'"]*['"]/i);
+    const postImgMatch = mainHtml.match(/<img\b[^>]*\bclass=['"][^'"]*(?:wp-post-image|attachment-post-thumbnail|attachment-thumbnail)[^'"]*['"][^>]*\bsrc=['"]([^'"]+)['"]/i) ||
+                         mainHtml.match(/<img\b[^>]*\bsrc=['"]([^'"]+)['"][^>]*\bclass=['"][^'"]*(?:wp-post-image|attachment-post-thumbnail|attachment-thumbnail)[^'"]*['"]/i) ||
+                         dlHtml.match(/<img\b[^>]*\bsrc=['"]([^'"]+)['"][^>]*\bclass=['"][^'"]*(?:wp-post-image|attachment-post-thumbnail|attachment-thumbnail)[^'"]*['"]/i);
 
     if (postImgMatch) {
         cover = postImgMatch[1] || postImgMatch[2];
@@ -397,8 +512,9 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
     }
 
     // Also look for og:image for banner
-    const ogMatch = html.match(/<meta\s+property=['"]og:image['"]\s+content=['"]([^'"]+)['"]/i) ||
-                    html.match(/<meta\s+content=['"]([^'"]+)['"]\s+property=['"]og:image['"]/i);
+    const ogMatch = mainHtml.match(/<meta\s+property=['"]og:image['"]\s+content=['"]([^'"]+)['"]/i) ||
+                    mainHtml.match(/<meta\s+content=['"]([^'"]+)['"]\s+property=['"]og:image['"]/i) ||
+                    dlHtml.match(/<meta\s+property=['"]og:image['"]\s+content=['"]([^'"]+)['"]/i);
     if (ogMatch) {
         banner = ogMatch[1];
     }
@@ -418,7 +534,7 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
     // Any <a> with class containing screen_shot
     const ssLinkRegex = /<a\b[^>]*\bclass=['"][^'"]*screen_shot[^'"]*['"][^>]*\bhref=['"]([^'"]+)['"]|<a\b[^>]*\bhref=['"]([^'"]+)['"][^>]*\bclass=['"][^'"]*screen_shot[^'"]*['"]/gi;
     let sMatch;
-    while ((sMatch = ssLinkRegex.exec(html)) !== null) {
+    while ((sMatch = ssLinkRegex.exec(mainHtml)) !== null) {
         const ssUrl = sMatch[1] || sMatch[2];
         if (ssUrl && !screenshots.includes(ssUrl)) {
             screenshots.push(ssUrl);
@@ -427,7 +543,7 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
 
     // Any img tag with screenshot in src or alt
     const ssImgRegex = /<img\b[^>]+src=['"]([^'"]+screenshot[^'"]*)['"]/gi;
-    while ((sMatch = ssImgRegex.exec(html)) !== null) {
+    while ((sMatch = ssImgRegex.exec(mainHtml)) !== null) {
         const ssUrl = sMatch[1];
         if (ssUrl && !screenshots.includes(ssUrl)) {
             screenshots.push(ssUrl);
@@ -436,39 +552,10 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
 
     // 5. Game description
     let description = '';
-    const descMatch = html.match(/<h3>Game description<\/h3>([\s\S]*?)(?:<div class="my-3"|<a [^>]*class="btn|<center>)/i);
+    const descMatch = mainHtml.match(/<h3>Game description<\/h3>([\s\S]*?)(?:<div class="my-3"|<a [^>]*class="btn|<center>)/i);
     if (descMatch) {
         description = stripHtml(descMatch[1]);
     }
-
-    // 6. Download main page link
-    const dlBtnMatch = html.match(/<a[^>]+href=['"](https:\/\/nswpedia\.com\/download\/[^'"]+)['"][^>]*>/i);
-    if (!dlBtnMatch) {
-        return {
-            title,
-            titleId,
-            releaseDate,
-            requiredFirmware,
-            publisher,
-            gameUrl,
-            cover,
-            cover_image: cover,
-            coverImage: cover,
-            banner,
-            banner_image: banner,
-            screenshots,
-            description,
-            downloadPageUrl: null,
-            mirrors: [],
-            downloads: []
-        };
-    }
-
-    const downloadPageUrl = dlBtnMatch[1];
-
-    // 5. Fetch Download Page
-    const dlRes = await fetchUrl(downloadPageUrl, { referer: gameUrl });
-    const dlHtml = dlRes.body;
 
     // 6. Parse all download tables
     const mirrorTables = [];
@@ -499,22 +586,24 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
 
         while ((rMatch = rowRegex.exec(block)) !== null) {
             const rowContent = rMatch[1];
-            if (rowContent.includes('<th')) continue;
+            if (/<th>/i.test(rowContent)) continue; // Header row
 
-            const colRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+            const linkMatch = rowContent.match(/href=['"](https:\/\/nswpedia\.com\/download\/[^'"]+)['"]/i);
+            if (!linkMatch) continue;
+
+            const intermediateUrl = linkMatch[1];
+
             const cols = [];
+            const colRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
             let cMatch;
             while ((cMatch = colRegex.exec(rowContent)) !== null) {
                 cols.push(stripHtml(cMatch[1]));
             }
 
-            const linkMatch = rowContent.match(/href=['"](https:\/\/nswpedia\.com\/download\/[^'"]+)['"]/i);
-            const intermediateUrl = linkMatch ? linkMatch[1] : null;
-
-            if (cols.length > 0 && intermediateUrl) {
-                const itemName = cols[0] || '';
-                let col1 = cols[1] || '';
-                let col2 = cols[2] || '';
+            if (cols.length >= 2) {
+                const itemName = cols[0];
+                const col1 = cols[1] || '';
+                const col2 = cols[2] || '';
 
                 let size = col1;
                 let typeHint = col2;
@@ -570,11 +659,10 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
         }
     }
 
-    // Flatten all downloads
-    const allDownloads = [];
+    const flatDownloads = [];
     for (const table of mirrorTables) {
         for (const item of table.items) {
-            allDownloads.push({
+            flatDownloads.push({
                 server: table.serverName,
                 name: item.name,
                 type: item.type,
@@ -593,7 +681,7 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
         releaseDate,
         requiredFirmware,
         publisher,
-        gameUrl,
+        gameUrl: canonicalGameUrl,
         downloadPageUrl,
         cover,
         cover_image: cover,
@@ -603,7 +691,7 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
         screenshots,
         description,
         mirrors: mirrorTables,
-        downloads: allDownloads
+        downloads: flatDownloads
     };
 }
 
