@@ -1,0 +1,153 @@
+name: 🚀 Upload Switch ROM to AbreHamrahi
+
+on:
+  workflow_dispatch:
+    inputs:
+      rom_url:
+        description: '🔗 Direct Download URL (یا لینک مستقیم فایل بازی NSP/XCI/Zip)'
+        required: true
+        type: string
+      game_title:
+        description: '🎮 نام بازی (مثلاً Super Mario Bros Wonder)'
+        required: true
+        type: string
+      folder_path:
+        description: '📁 مسیر پوشه در ابر همراهی (پیش‌فرض: Nintendo_Switch/نام_بازی)'
+        required: false
+        default: 'Nintendo_Switch'
+        type: string
+      custom_file_name:
+        description: '📝 نام اختصاصی فایل (اختیاری - در صورت خالی بودن نام پیش‌فرض تولید می‌شود)'
+        required: false
+        type: string
+      split_2gb:
+        description: '📦 تقسیم به پارت‌های ۲ گیگابایتی در صورت حجم بالای ۲ گیگابایت؟'
+        required: false
+        default: 'true'
+        type: boolean
+
+jobs:
+  download-and-upload:
+    name: ⚡ Download, Split (2GB) & Upload to Hamrahi
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 📦 Install High-Speed Download & Packaging Tools (Aria2, 7z, Zip)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2 p7zip-full zip unzip
+
+      - name: ⚡ Download Game File via High-Speed Pipeline
+        id: download_step
+        run: |
+          mkdir -p ./downloads
+          cd ./downloads
+
+          echo "🚀 Downloading from: ${{ github.event.inputs.rom_url }}"
+          
+          # Use aria2c with 16 connections and resume support
+          aria2c -x 16 -s 16 -k 1M --file-allocation=none "${{ github.event.inputs.rom_url }}"
+
+          # Find downloaded file name
+          DOWNLOADED_FILE=$(ls -1 | head -n 1)
+          FILE_PATH="$GITHUB_WORKSPACE/downloads/$DOWNLOADED_FILE"
+          FILE_SIZE=$(stat -c%s "$FILE_PATH")
+
+          echo "Downloaded file: $DOWNLOADED_FILE ($FILE_SIZE bytes)"
+          
+          # Validation: Check if downloaded file is an HTML error page or suspiciously small (< 5MB)
+          if [ "$FILE_SIZE" -lt 5242880 ]; then
+            if grep -qiE "<html|<!doctype html|403 forbidden|access denied" "$FILE_PATH"; then
+              echo "❌ ERROR: The provided URL returned an HTML error page (HTTP 403 Forbidden / Expired Link / Captcha Wall) instead of a direct ROM file!"
+              head -n 25 "$FILE_PATH"
+              exit 1
+            fi
+            echo "❌ ERROR: Downloaded file size is only $FILE_SIZE bytes. Expected valid Nintendo Switch ROM (> 50MB)."
+            exit 1
+          fi
+
+          echo "DOWNLOADED_FILE=$DOWNLOADED_FILE" >> $GITHUB_ENV
+          echo "FILE_PATH=$FILE_PATH" >> $GITHUB_ENV
+          echo "FILE_SIZE=$FILE_SIZE" >> $GITHUB_ENV
+          ls -lh
+
+      - name: 🔒 Package & Split into 2GB Parts (if needed)
+        id: package_step
+        run: |
+          cd ./downloads
+          RAW_FILE="$DOWNLOADED_FILE"
+          CUSTOM_NAME="${{ github.event.inputs.custom_file_name }}"
+          CLEAN_TITLE=$(echo "${{ github.event.inputs.game_title }}" | tr ' ' '_' | tr -cd '[:alnum:]_-')
+          
+          if [ -n "$CUSTOM_NAME" ]; then
+            BASE_NAME=$(echo "$CUSTOM_NAME" | sed 's/\.[^.]*$//')
+          else
+            BASE_NAME="${CLEAN_TITLE}"
+          fi
+
+          mkdir -p ./packaged
+          
+          # 2GB in bytes = 2097152000 (2000 MB)
+          SPLIT_THRESHOLD=2097152000
+          
+          if [ "$FILE_SIZE" -gt "$SPLIT_THRESHOLD" ] && [ "${{ github.event.inputs.split_2gb }}" == "true" ]; then
+            echo "📦 File size ($FILE_SIZE bytes) exceeds 2GB -> Splitting into 2000MB password-protected parts (.7z.001, .7z.002)..."
+            7z a -v2000m -mx=1 -p"ninten2.ir" "./packaged/${BASE_NAME}.7z" "$RAW_FILE"
+            rm -f "$RAW_FILE"
+          else
+            echo "📦 Packaging into single password-protected zip file..."
+            7z a -tzip -mx=1 -p"ninten2.ir" "./packaged/${BASE_NAME}.zip" "$RAW_FILE"
+            rm -f "$RAW_FILE"
+          fi
+
+          echo "Listing packaged parts:"
+          ls -lh ./packaged
+
+      - name: ☁️ Upload All Parts to AbreHamrahi Cloud (Parallel 4x)
+        id: upload_step
+        env:
+          ABREHAMRAHI_REFRESH_TOKEN: ${{ secrets.ABREHAMRAHI_REFRESH_TOKEN }}
+        run: |
+          FOLDER_PATH="${{ github.event.inputs.folder_path }}"
+          if [ "$FOLDER_PATH" == "Nintendo_Switch" ] && [ -n "${{ github.event.inputs.game_title }}" ]; then
+            CLEAN_TITLE=$(echo "${{ github.event.inputs.game_title }}" | tr ' ' '_' | tr -cd '[:alnum:]_-')
+            FOLDER_PATH="Nintendo_Switch/$CLEAN_TITLE"
+          fi
+
+          SUMMARY_FILE="$GITHUB_WORKSPACE/upload_summary.txt"
+          touch $SUMMARY_FILE
+
+          # Loop through each packaged file and upload
+          for part_file in ./downloads/packaged/*; do
+            if [ -f "$part_file" ]; then
+              PART_NAME=$(basename "$part_file")
+              echo "--------------------------------------------------------"
+              echo "🚀 Uploading Part: $PART_NAME"
+              
+              node hamrahi_uploader.cjs --file "$part_file" --folder "$FOLDER_PATH" --name "$PART_NAME" --concurrency 4
+              
+              echo "- **فایل:** \`$PART_NAME\`" >> $SUMMARY_FILE
+            fi
+          done
+
+      - name: 📋 Display Summary and Public Download Links
+        if: always()
+        run: |
+          echo "### 🎮 انتشار خودکار بازی نینتندو سوییچ با موفقیت انجام شد!" >> $GITHUB_STEP_SUMMARY
+          echo "- **نام بازی:** ${{ github.event.inputs.game_title }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **مسیر پوشه در همراهی:** ${{ github.event.inputs.folder_path }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **رمز فایل‌ها (پسورد):** \`ninten2.ir\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### 📦 لیست پارت‌ها:" >> $GITHUB_STEP_SUMMARY
+          if [ -f "$GITHUB_WORKSPACE/upload_summary.txt" ]; then
+            cat "$GITHUB_WORKSPACE/upload_summary.txt" >> $GITHUB_STEP_SUMMARY
+          fi
