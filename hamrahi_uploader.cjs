@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * AbreHamrahi Automated Uploader with Folder Hierarchy Support
+ * AbreHamrahi Automated Uploader with Folder Hierarchy Support & High-Speed Parallel Chunking
  * Developed for Ninten2 Switch ROM Distribution System
  */
 
@@ -11,7 +11,7 @@ const path = require('path');
 
 const CHUNK_SIZE = 5242880; // 5MB standard chunk size for AbreHamrahi
 
-function request(options, data = null, retries = 3) {
+function request(options, data = null, retries = 3, timeoutMs = 30000) {
     return new Promise((resolve, reject) => {
         let payload = null;
         if (data !== null && data !== undefined) {
@@ -35,7 +35,8 @@ function request(options, data = null, retries = 3) {
 
         const req = https.request({
             ...options,
-            headers
+            headers,
+            timeout: timeoutMs
         }, (res) => {
             let body = '';
             res.on('data', chunk => body += chunk);
@@ -47,15 +48,21 @@ function request(options, data = null, retries = 3) {
                 }
             });
         });
+
+        req.on('timeout', () => {
+            req.destroy(new Error(`HTTP request timed out after ${timeoutMs / 1000}s`));
+        });
+
         req.on('error', (err) => {
             if (retries > 0) {
                 setTimeout(() => {
-                    resolve(request(options, data, retries - 1));
+                    resolve(request(options, data, retries - 1, timeoutMs));
                 }, 1500);
             } else {
                 reject(err);
             }
         });
+
         if (payload) {
             req.write(payload);
         }
@@ -63,7 +70,7 @@ function request(options, data = null, retries = 3) {
     });
 }
 
-function putChunk(urlStr, buffer, retries = 3) {
+function putChunk(urlStr, buffer, retries = 3, timeoutMs = 60000) {
     return new Promise((resolve, reject) => {
         const url = new URL(urlStr);
         const req = https.request({
@@ -73,7 +80,8 @@ function putChunk(urlStr, buffer, retries = 3) {
             method: 'PUT',
             headers: {
                 'Content-Length': buffer.length
-            }
+            },
+            timeout: timeoutMs
         }, (res) => {
             let body = '';
             res.on('data', chunk => body += chunk);
@@ -85,20 +93,26 @@ function putChunk(urlStr, buffer, retries = 3) {
                     });
                 } else if (retries > 0) {
                     console.log(`\n⚠️ Chunk failed with status ${res.statusCode}. Retrying (${retries} left)...`);
-                    setTimeout(() => resolve(putChunk(urlStr, buffer, retries - 1)), 2000);
+                    setTimeout(() => resolve(putChunk(urlStr, buffer, retries - 1, timeoutMs)), 2000);
                 } else {
                     reject(new Error(`Failed to upload chunk: HTTP ${res.statusCode}`));
                 }
             });
         });
+
+        req.on('timeout', () => {
+            req.destroy(new Error(`Chunk upload timed out after ${timeoutMs / 1000}s`));
+        });
+
         req.on('error', (err) => {
             if (retries > 0) {
                 console.log(`\n⚠️ Network error: ${err.message}. Retrying (${retries} left)...`);
-                setTimeout(() => resolve(putChunk(urlStr, buffer, retries - 1)), 2000);
+                setTimeout(() => resolve(putChunk(urlStr, buffer, retries - 1, timeoutMs)), 2000);
             } else {
                 reject(err);
             }
         });
+
         req.write(buffer);
         req.end();
     });
@@ -355,9 +369,9 @@ async function findExistingFileInHamrahi(accessToken, folderId, fileNames, refre
 }
 
 /**
- * Upload a local file to AbreHamrahi with progress indicator
+ * Upload a local file to AbreHamrahi with parallel multi-part upload & progress indicator
  */
-async function uploadFileToHamrahi(accessToken, filePath, parentFolderId = null, customFileName = null, refreshToken = null) {
+async function uploadFileToHamrahi(accessToken, filePath, parentFolderId = null, customFileName = null, refreshToken = null, concurrency = 4) {
     if (!fs.existsSync(filePath)) {
         throw new Error(`File not found at: ${filePath}`);
     }
@@ -419,37 +433,66 @@ async function uploadFileToHamrahi(accessToken, filePath, parentFolderId = null,
     const { key, upload_id, signed_urls } = startRes.body;
     console.log(`📦 Allocated ${signed_urls.length} chunk(s) (5MB each).`);
 
-    // 2. Upload Chunks
+    // 2. Upload Chunks in Parallel (Worker Pool)
+    const CONCURRENCY = Math.max(1, Math.min(parseInt(concurrency, 10) || 4, signed_urls.length));
+    console.log(`⚡ Uploading chunks using ${CONCURRENCY} parallel worker(s)...`);
+
     const fd = fs.openSync(filePath, 'r');
-    const completedParts = [];
-    const buffer = Buffer.alloc(CHUNK_SIZE);
+    const completedParts = new Array(signed_urls.length);
+    let completedCount = 0;
+    let nextIndex = 0;
+    let hasError = null;
 
-    for (let i = 0; i < signed_urls.length; i++) {
-        const partNumber = i + 1;
-        const partUrl = signed_urls[i];
-        const bytesToRead = Math.min(CHUNK_SIZE, fileSize - (i * CHUNK_SIZE));
-        
-        fs.readSync(fd, buffer, 0, bytesToRead, i * CHUNK_SIZE);
-        const chunkSlice = buffer.subarray(0, bytesToRead);
+    async function worker() {
+        while (nextIndex < signed_urls.length) {
+            if (hasError) break;
+            const currentIndex = nextIndex++;
+            const partNumber = currentIndex + 1;
+            const partUrl = signed_urls[currentIndex];
+            const offset = currentIndex * CHUNK_SIZE;
+            const bytesToRead = Math.min(CHUNK_SIZE, fileSize - offset);
 
-        const percent = ((partNumber / signed_urls.length) * 100).toFixed(1);
-        process.stdout.write(`\r⏳ Uploading chunk ${partNumber}/${signed_urls.length} [${percent}%]...`);
+            const chunkBuf = Buffer.alloc(bytesToRead);
+            fs.readSync(fd, chunkBuf, 0, bytesToRead, offset);
 
-        const result = await putChunk(partUrl, chunkSlice);
-
-        completedParts.push({
-            PartNumber: partNumber,
-            ETag: `"${result.etag}"`,
-            size: bytesToRead
-        });
+            try {
+                const result = await putChunk(partUrl, chunkBuf);
+                completedParts[currentIndex] = {
+                    PartNumber: partNumber,
+                    ETag: `"${result.etag}"`,
+                    size: bytesToRead
+                };
+                completedCount++;
+                const percent = ((completedCount / signed_urls.length) * 100).toFixed(1);
+                process.stdout.write(`\r⏳ Uploading: ${completedCount}/${signed_urls.length} chunks [${percent}%] (${CONCURRENCY} parallel)...`);
+            } catch (err) {
+                hasError = err;
+                throw err;
+            }
+        }
     }
-    fs.closeSync(fd);
-    console.log('\n✅ All chunks uploaded.');
+
+    const workers = [];
+    for (let w = 0; w < CONCURRENCY; w++) {
+        workers.push(worker());
+    }
+
+    try {
+        await Promise.all(workers);
+    } finally {
+        fs.closeSync(fd);
+    }
+
+    if (hasError) {
+        throw hasError;
+    }
+
+    console.log('\n✅ All chunks uploaded successfully in parallel.');
 
     // 3. Complete Upload
     console.log('🔄 Finalizing upload with AbreHamrahi storage...');
     
-    // Always refresh token before complete-upload if refreshToken is available, because uploading chunks for large files can take many minutes!
+    // Always refresh token before complete-upload if refreshToken is available
     if (refreshToken) {
         console.log('🔑 Refreshing access token before completing upload (protecting against expiration)...');
         await refreshActiveToken();
@@ -563,6 +606,7 @@ async function main() {
     const filePath = params['file'] || params['path'];
     const folderPath = params['folder'] || 'Nintendo_Switch';
     const customName = params['name'] || null;
+    const concurrency = parseInt(params['concurrency'] || '4', 10) || 4;
 
     if (!refreshToken) {
         console.error('❌ Error: Missing refresh token. Pass --refresh-token or set ABREHAMRAHI_REFRESH_TOKEN env.');
@@ -581,7 +625,7 @@ async function main() {
         console.log(`🗂️ Resolving target folder: "${folderPath}"...`);
         const folderId = await resolveFolderPath(accessToken, folderPath, refreshToken);
 
-        const result = await uploadFileToHamrahi(accessToken, filePath, folderId, customName, refreshToken);
+        const result = await uploadFileToHamrahi(accessToken, filePath, folderId, customName, refreshToken, concurrency);
 
         console.log('\n=============================================');
         console.log('🎉 UPLOAD COMPLETE!');
