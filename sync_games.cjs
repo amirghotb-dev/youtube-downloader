@@ -474,126 +474,145 @@ async function run() {
                 const subFolder = fileItem.type === 'Base Game' ? 'Base_Game' : (fileItem.type === 'Update' ? 'Updates' : 'DLC');
                 const targetHamrahiFolder = `${gameFolderName}/${subFolder}`;
 
-                try {
-                    console.log(`    🔑 Refreshing AbreHamrahi access token...`);
-                    const currentAccessToken = await getAccessToken(REFRESH_TOKEN);
+                let fileSuccess = false;
+                let lastFileError = null;
 
-                    console.log(`    ☁️ Resolving AbreHamrahi folder: "${targetHamrahiFolder}"...`);
-                    const folderId = await resolveFolderPath(currentAccessToken, targetHamrahiFolder, REFRESH_TOKEN);
-
-                    // Candidate filenames to check in AbreHamrahi before downloading
-                    const candidateNames = [
-                        baseRarName,
-                        `${cleanBaseName}.part1.rar`,
-                        `${cleanBaseName}.rar`,
-                        `${cleanBaseName}.zip`,
-                        `${cleanBaseName}.7z.001`,
-                        fileItem.name,
-                        baseRarName.replace(/\.rar$/i, '.nsp'),
-                        baseRarName.replace(/\.rar$/i, '.xci'),
-                        fileItem.name.replace(/\.[a-zA-Z0-9]+$/, '') + '.rar',
-                        `${cleanFolderName(gameData.title)}_${subFolder}.rar`,
-                        `${cleanFolderName(gameData.title)}.rar`
-                    ];
-
-                    // Check if file already exists in AbreHamrahi
-                    console.log(`    🔍 Checking if file already exists on AbreHamrahi Cloud...`);
-                    let existingCloudFile = await findExistingFileInHamrahi(currentAccessToken, folderId, candidateNames, REFRESH_TOKEN);
-
-                    let fileTypeKey = 'base_game';
-                    if (fileItem.type === 'Update') fileTypeKey = 'update';
-                    else if (fileItem.type === 'DLC') fileTypeKey = 'dlc';
-
-                    let baseDisplayTitle = `${cleanGameTitle(gameData.title).replace(/_/g, ' ')}`;
-                    if (fileItem.type === 'Base Game') {
-                        baseDisplayTitle += ' - نسخه اصلی بازی';
-                    } else if (fileItem.type === 'Update') {
-                        baseDisplayTitle += ` - آپدیت ${fileItem.version || ''}`.trim();
-                    } else if (fileItem.type === 'DLC') {
-                        baseDisplayTitle += ' - بسته الحاقی (DLC)';
-                    }
-
-                    if (existingCloudFile) {
-                        console.log(`    ⚡ [CACHE HIT] Reusing existing cloud file without re-downloading: ${existingCloudFile.public_url}`);
-                        uploadedFiles.push({
-                            file_type: fileTypeKey,
-                            title: existingCloudFile.name,
-                            display_title: baseDisplayTitle,
-                            version: fileItem.version || 'v1.0.0',
-                            file_size: formatBytes(existingCloudFile.size),
-                            file_format: existingCloudFile.name.endsWith('.rar') ? 'RAR' : (existingCloudFile.name.endsWith('.7z') ? '7Z' : 'ZIP'),
-                            password: ZIP_PASSWORD,
-                            part_number: 1,
-                            total_parts: 1,
-                            server_name: 'سرور اختصاصی مستقیم ابر همراهی (نیم‌بها)',
-                            download_url: existingCloudFile.public_url,
-                            folder_path: targetHamrahiFolder,
-                            hamrahi_id: existingCloudFile.id,
-                        });
-                    } else {
-                        console.log(`    📥 File not found in cloud. Starting download from source: ${fileItem.directUrl}`);
-                        // Step A: Determine clean temp filename
-                        const tempExt = fileItem.format ? `.${fileItem.format.toLowerCase()}` : '.nsp';
-                        const tempDownloadName = `temp_${Date.now()}_${cleanFolderName(gameData.title)}_${i + 1}${tempExt}`;
-                        const tempLocalFilePath = path.join(DEST_DIR, tempDownloadName);
-
-                        // Step B: Download file locally
-                        console.log(`    Saving temporary download to: ${tempLocalFilePath}`);
-                        const dlResult = await downloadRomFile(fileItem.directUrl, tempLocalFilePath);
-                        console.log(`\n    ✅ Downloaded successfully: ${formatBytes(dlResult.totalBytes)}`);
-
-                        // Step C: Package & split into 2GB password-protected parts (.part1.rar, .part2.rar)
-                        console.log(`    🔒 Packaging into RAR format with password '${ZIP_PASSWORD}'...`);
-                        const generatedParts = createProtectedParts(tempLocalFilePath, DEST_DIR, baseRarName, ZIP_PASSWORD, PART_SIZE_MB);
-                        console.log(`    📦 Generated ${generatedParts.length} part(s).`);
-
-                        // Clean up temporary downloaded source file
-                        if (fs.existsSync(tempLocalFilePath)) {
-                            fs.unlinkSync(tempLocalFilePath);
+                for (let fileAttempt = 1; fileAttempt <= 3; fileAttempt++) {
+                    try {
+                        if (fileAttempt > 1) {
+                            console.log(`\n    🔄 [Retry ${fileAttempt}/3] Retrying file: ${fileItem.name}...`);
+                            await new Promise(r => setTimeout(r, 4000));
                         }
 
-                        // Step D: Upload all parts to AbreHamrahi Cloud
-                        for (let pIdx = 0; pIdx < generatedParts.length; pIdx++) {
-                            const part = generatedParts[pIdx];
-                            console.log(`    ☁️ Uploading Part ${part.partNumber}/${part.totalParts}: "${part.name}" (${formatBytes(part.size)})...`);
+                        console.log(`    🔑 Refreshing AbreHamrahi access token...`);
+                        const currentAccessToken = await getAccessToken(REFRESH_TOKEN);
 
-                            let partUploadResult = await findExistingFileInHamrahi(currentAccessToken, folderId, [part.name], REFRESH_TOKEN);
-                            if (!partUploadResult) {
-                                partUploadResult = await uploadFileToHamrahi(currentAccessToken, part.path, folderId, part.name, REFRESH_TOKEN);
-                            }
-                            console.log(`    🎉 Part ${part.partNumber} Uploaded! Public Link: ${partUploadResult.public_url}`);
+                        console.log(`    ☁️ Resolving AbreHamrahi folder: "${targetHamrahiFolder}"...`);
+                        const folderId = await resolveFolderPath(currentAccessToken, targetHamrahiFolder, REFRESH_TOKEN);
 
-                            let partTitle = baseDisplayTitle;
-                            if (part.totalParts > 1) {
-                                partTitle += ` (پارت ${part.partNumber} از ${part.totalParts})`;
-                            }
+                        // Candidate filenames to check in AbreHamrahi before downloading
+                        const candidateNames = [
+                            baseRarName,
+                            `${cleanBaseName}.part1.rar`,
+                            `${cleanBaseName}.rar`,
+                            `${cleanBaseName}.zip`,
+                            `${cleanBaseName}.7z.001`,
+                            fileItem.name,
+                            baseRarName.replace(/\.rar$/i, '.nsp'),
+                            baseRarName.replace(/\.rar$/i, '.xci'),
+                            fileItem.name.replace(/\.[a-zA-Z0-9]+$/, '') + '.rar',
+                            `${cleanFolderName(gameData.title)}_${subFolder}.rar`,
+                            `${cleanFolderName(gameData.title)}.rar`
+                        ];
 
+                        // Check if file already exists in AbreHamrahi
+                        console.log(`    🔍 Checking if file already exists on AbreHamrahi Cloud...`);
+                        let existingCloudFile = await findExistingFileInHamrahi(currentAccessToken, folderId, candidateNames, REFRESH_TOKEN);
+
+                        let fileTypeKey = 'base_game';
+                        if (fileItem.type === 'Update') fileTypeKey = 'update';
+                        else if (fileItem.type === 'DLC') fileTypeKey = 'dlc';
+
+                        let baseDisplayTitle = `${cleanGameTitle(gameData.title).replace(/_/g, ' ')}`;
+                        if (fileItem.type === 'Base Game') {
+                            baseDisplayTitle += ' - نسخه اصلی بازی';
+                        } else if (fileItem.type === 'Update') {
+                            baseDisplayTitle += ` - آپدیت ${fileItem.version || ''}`.trim();
+                        } else if (fileItem.type === 'DLC') {
+                            baseDisplayTitle += ' - بسته الحاقی (DLC)';
+                        }
+
+                        if (existingCloudFile) {
+                            console.log(`    ⚡ [CACHE HIT] Reusing existing cloud file without re-downloading: ${existingCloudFile.public_url}`);
                             uploadedFiles.push({
                                 file_type: fileTypeKey,
-                                title: part.name,
-                                display_title: partTitle,
+                                title: existingCloudFile.name,
+                                display_title: baseDisplayTitle,
                                 version: fileItem.version || 'v1.0.0',
-                                file_size: formatBytes(partUploadResult.size),
-                                file_format: part.format || 'RAR',
+                                file_size: formatBytes(existingCloudFile.size),
+                                file_format: existingCloudFile.name.endsWith('.rar') ? 'RAR' : (existingCloudFile.name.endsWith('.7z') ? '7Z' : 'ZIP'),
                                 password: ZIP_PASSWORD,
-                                part_number: part.partNumber,
-                                total_parts: part.totalParts,
+                                part_number: 1,
+                                total_parts: 1,
                                 server_name: 'سرور اختصاصی مستقیم ابر همراهی (نیم‌بها)',
-                                download_url: partUploadResult.public_url,
+                                download_url: existingCloudFile.public_url,
                                 folder_path: targetHamrahiFolder,
-                                hamrahi_id: partUploadResult.id,
+                                hamrahi_id: existingCloudFile.id,
                             });
+                            fileSuccess = true;
+                            break;
+                        } else {
+                            console.log(`    📥 File not found in cloud. Starting download from source: ${fileItem.directUrl}`);
+                            // Step A: Determine clean temp filename
+                            const tempExt = fileItem.format ? `.${fileItem.format.toLowerCase()}` : '.nsp';
+                            const tempDownloadName = `temp_${Date.now()}_${cleanFolderName(gameData.title)}_${i + 1}${tempExt}`;
+                            const tempLocalFilePath = path.join(DEST_DIR, tempDownloadName);
 
-                            // Clean up local part file
-                            if (fs.existsSync(part.path)) {
-                                fs.unlinkSync(part.path);
+                            // Step B: Download file locally
+                            console.log(`    Saving temporary download to: ${tempLocalFilePath}`);
+                            const dlResult = await downloadRomFile(fileItem.directUrl, tempLocalFilePath);
+                            console.log(`\n    ✅ Downloaded successfully: ${formatBytes(dlResult.totalBytes)}`);
+
+                            // Step C: Package & split into 2GB password-protected parts (.part1.rar, .part2.rar)
+                            console.log(`    🔒 Packaging into RAR format with password '${ZIP_PASSWORD}'...`);
+                            const generatedParts = createProtectedParts(tempLocalFilePath, DEST_DIR, baseRarName, ZIP_PASSWORD, PART_SIZE_MB);
+                            console.log(`    📦 Generated ${generatedParts.length} part(s).`);
+
+                            // Clean up temporary downloaded source file
+                            if (fs.existsSync(tempLocalFilePath)) {
+                                fs.unlinkSync(tempLocalFilePath);
                             }
-                        }
-                        console.log(`    🧹 Cleaned up temporary local part files.`);
-                    }
 
-                } catch (fileErr) {
-                    console.error(`\n    ⚠️ Warning: Failed processing file ${fileItem.name}: ${fileErr.message}`);
+                            // Step D: Upload all parts to AbreHamrahi Cloud
+                            for (let pIdx = 0; pIdx < generatedParts.length; pIdx++) {
+                                const part = generatedParts[pIdx];
+                                console.log(`    ☁️ Uploading Part ${part.partNumber}/${part.totalParts}: "${part.name}" (${formatBytes(part.size)})...`);
+
+                                let partUploadResult = await findExistingFileInHamrahi(currentAccessToken, folderId, [part.name], REFRESH_TOKEN);
+                                if (!partUploadResult) {
+                                    partUploadResult = await uploadFileToHamrahi(currentAccessToken, part.path, folderId, part.name, REFRESH_TOKEN);
+                                }
+                                console.log(`    🎉 Part ${part.partNumber} Uploaded! Public Link: ${partUploadResult.public_url}`);
+
+                                let partTitle = baseDisplayTitle;
+                                if (part.totalParts > 1) {
+                                    partTitle += ` (پارت ${part.partNumber} از ${part.totalParts})`;
+                                }
+
+                                uploadedFiles.push({
+                                    file_type: fileTypeKey,
+                                    title: part.name,
+                                    display_title: partTitle,
+                                    version: fileItem.version || 'v1.0.0',
+                                    file_size: formatBytes(partUploadResult.size),
+                                    file_format: part.format || 'RAR',
+                                    password: ZIP_PASSWORD,
+                                    part_number: part.partNumber,
+                                    total_parts: part.totalParts,
+                                    server_name: 'سرور اختصاصی مستقیم ابر همراهی (نیم‌بها)',
+                                    download_url: partUploadResult.public_url,
+                                    folder_path: targetHamrahiFolder,
+                                    hamrahi_id: partUploadResult.id,
+                                });
+
+                                // Clean up local part file
+                                if (fs.existsSync(part.path)) {
+                                    fs.unlinkSync(part.path);
+                                }
+                            }
+                            console.log(`    🧹 Cleaned up temporary local part files.`);
+                            fileSuccess = true;
+                            break;
+                        }
+
+                    } catch (fileErr) {
+                        lastFileError = fileErr;
+                        console.error(`\n    ⚠️ Attempt ${fileAttempt} failed for file ${fileItem.name}: ${fileErr.message}`);
+                    }
+                }
+
+                if (!fileSuccess) {
+                    console.error(`\n    ❌ Failed processing file ${fileItem.name} after 3 attempts: ${lastFileError?.message}`);
                 }
             }
 

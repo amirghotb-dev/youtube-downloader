@@ -301,20 +301,15 @@ async function findExistingFileInHamrahi(accessToken, folderId, fileNames, refre
         // 1. Exact match on any candidate name
         let found = filesInFolder.find(item => candidateList.includes(item.name.toLowerCase()));
 
-        // 2. Fuzzy match: same base name without extension
+        // 2. Fuzzy match: same base name without extension (must also be > 10MB to avoid incomplete corrupt uploads)
         if (!found) {
             found = filesInFolder.find(item => {
                 const itemBase = item.name.replace(/\.[a-zA-Z0-9]+$/, '').toLowerCase();
                 return candidateList.some(cand => {
                     const candBase = cand.replace(/\.[a-zA-Z0-9]+$/, '').toLowerCase();
                     return itemBase === candBase || itemBase.includes(candBase) || candBase.includes(itemBase);
-                });
+                }) && (item.size && item.size > 10485760);
             });
-        }
-
-        // 3. If only 1 file in this specific subfolder, reuse it
-        if (!found && filesInFolder.length === 1) {
-            found = filesInFolder[0];
         }
 
         if (found) {
