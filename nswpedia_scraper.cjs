@@ -17,12 +17,12 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
-const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 /**
  * HTTP GET helper with redirect handling, custom headers and auto-retry
  */
-function fetchUrl(urlStr, options = {}, retries = 3) {
+function fetchUrl(urlStr, options = {}, retries = 4) {
     return new Promise((resolve, reject) => {
         let parsedUrl;
         try {
@@ -40,13 +40,26 @@ function fetchUrl(urlStr, options = {}, retries = 3) {
             method: 'GET',
             headers: {
                 'User-Agent': USER_AGENT,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9,fa;q=0.8',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache',
+                'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                'Sec-Ch-Ua-Mobile': '?0',
+                'Sec-Ch-Ua-Platform': '"Windows"',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Upgrade-Insecure-Requests': '1',
                 'Referer': options.referer || 'https://nswpedia.com/',
                 ...options.headers
             },
             rejectUnauthorized: false
         };
+
+        const timeoutMs = options.timeout || 60000;
+        let isTimedOut = false;
 
         const req = protocol.request(reqOptions, (res) => {
             if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
@@ -68,16 +81,18 @@ function fetchUrl(urlStr, options = {}, retries = 3) {
 
         req.on('error', (err) => {
             if (retries > 0) {
+                const backoffDelay = (5 - retries) * 2000;
                 setTimeout(() => {
                     resolve(fetchUrl(urlStr, options, retries - 1));
-                }, 1500);
+                }, backoffDelay);
             } else {
                 reject(err);
             }
         });
 
-        req.setTimeout(options.timeout || 30000, () => {
-            req.destroy(new Error(`Timeout fetching ${urlStr}`));
+        req.setTimeout(timeoutMs, () => {
+            isTimedOut = true;
+            req.destroy(new Error(`Timeout fetching ${urlStr} (${timeoutMs}ms)`));
         });
 
         req.end();

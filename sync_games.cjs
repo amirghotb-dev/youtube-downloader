@@ -307,7 +307,23 @@ async function run() {
         try {
             // 3. Scrape NSWPedia Game Page
             console.log(`🔍 Scraping game page and resolving direct ROM mirrors...`);
-            const gameData = await scrapeGame(item.nswpedia_url, { resolveMirrors: true });
+            let gameData = null;
+            let scrapeError = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    gameData = await scrapeGame(item.nswpedia_url, { resolveMirrors: true });
+                    break;
+                } catch (err) {
+                    scrapeError = err;
+                    if (attempt < 3) {
+                        console.log(`⚠️ Scrape attempt ${attempt} failed: ${err.message}. Retrying in 5s...`);
+                        await new Promise(r => setTimeout(r, 5000));
+                    }
+                }
+            }
+            if (!gameData) {
+                throw scrapeError || new Error(`Failed to scrape game page after 3 attempts.`);
+            }
 
             console.log(`\n📋 Extracted Game Details:`);
             console.log(`    Title:     ${gameData.title}`);
