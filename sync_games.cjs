@@ -89,48 +89,63 @@ function createProtectedParts(sourceFilePath, destDir, baseName, password = ZIP_
     if (totalSize > splitSizeBytes && (hasRar || has7z || hasZip)) {
         console.log(`    📦 File size (${formatBytes(totalSize)}) exceeds ${splitSizeMb}MB -> Splitting into ${splitSizeMb}MB RAR parts (.part1.rar, .part2.rar)...`);
 
+        let splitSuccess = false;
+
         if (hasRar) {
-            // Standard RAR multi-volume format (.part1.rar, .part2.rar, etc.)
-            // -m0 (Store mode, zero compression delay) + -p (password) + -ep1 (exclude paths) + -idq (quiet)
-            const outputBase = path.join(destDir, `${cleanBaseName}.rar`);
-            const cmd = `rar a -v${splitSizeMb}m -m0 -p"${password}" -ep1 -idq "${outputBase}" "${sourceFilePath}"`;
-            execSync(cmd, { stdio: 'ignore' });
+            try {
+                // Standard RAR multi-volume format (.part1.rar, .part2.rar, etc.)
+                // -m0 (Store mode, zero compression delay) + -p (password) + -ep1 (exclude paths) -y (assume yes)
+                const outputBase = path.join(destDir, `${cleanBaseName}.rar`);
+                const cmd = `rar a -v${splitSizeMb}m -m0 -p"${password}" -ep1 -y "${outputBase}" "${sourceFilePath}"`;
+                execSync(cmd, { stdio: 'inherit' });
 
-            const createdFiles = fs.readdirSync(destDir)
-                .filter(f => f.startsWith(`${cleanBaseName}.part`) && f.endsWith('.rar'))
-                .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+                const createdFiles = fs.readdirSync(destDir)
+                    .filter(f => f.startsWith(`${cleanBaseName}.part`) && f.endsWith('.rar'))
+                    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
-            if (createdFiles.length > 0) {
-                const totalParts = createdFiles.length;
-                for (let idx = 0; idx < createdFiles.length; idx++) {
-                    const partFile = createdFiles[idx];
-                    const partPath = path.join(destDir, partFile);
-                    const partStats = fs.statSync(partPath);
+                if (createdFiles.length > 0) {
+                    const totalParts = createdFiles.length;
+                    for (let idx = 0; idx < createdFiles.length; idx++) {
+                        const partFile = createdFiles[idx];
+                        const partPath = path.join(destDir, partFile);
+                        const partStats = fs.statSync(partPath);
+                        parts.push({
+                            path: partPath,
+                            name: partFile,
+                            partNumber: idx + 1,
+                            totalParts: totalParts,
+                            size: partStats.size,
+                            format: 'RAR'
+                        });
+                    }
+                    splitSuccess = true;
+                } else if (fs.existsSync(outputBase)) {
+                    const outStats = fs.statSync(outputBase);
                     parts.push({
-                        path: partPath,
-                        name: partFile,
-                        partNumber: idx + 1,
-                        totalParts: totalParts,
-                        size: partStats.size,
+                        path: outputBase,
+                        name: path.basename(outputBase),
+                        partNumber: 1,
+                        totalParts: 1,
+                        size: outStats.size,
                         format: 'RAR'
                     });
+                    splitSuccess = true;
                 }
-            } else if (fs.existsSync(outputBase)) {
-                const outStats = fs.statSync(outputBase);
-                parts.push({
-                    path: outputBase,
-                    name: path.basename(outputBase),
-                    partNumber: 1,
-                    totalParts: 1,
-                    size: outStats.size,
-                    format: 'RAR'
-                });
+            } catch (rarErr) {
+                console.warn(`    ⚠️ RAR command failed (${rarErr.message}). Attempting fallback with 7z...`);
+                // Clean up any failed RAR parts
+                const failedFiles = fs.readdirSync(destDir).filter(f => f.startsWith(`${cleanBaseName}.`) && f.endsWith('.rar'));
+                for (const ff of failedFiles) {
+                    try { fs.unlinkSync(path.join(destDir, ff)); } catch {}
+                }
             }
-        } else if (has7z) {
+        }
+        
+        if (!splitSuccess && has7z) {
             // Fallback 7z
             const outputBase = path.join(destDir, `${cleanBaseName}.7z`);
             const cmd = `7z a -v${splitSizeMb}m -mx=0 -mmt=on -p"${password}" "${outputBase}" "${sourceFilePath}"`;
-            execSync(cmd, { stdio: 'ignore' });
+            execSync(cmd, { stdio: 'inherit' });
 
             const createdFiles = fs.readdirSync(destDir)
                 .filter(f => f.startsWith(`${cleanBaseName}.7z.`))
@@ -150,6 +165,7 @@ function createProtectedParts(sourceFilePath, destDir, baseName, password = ZIP_
                     format: '7Z'
                 });
             }
+            splitSuccess = true;
         }
     } else {
         // Single part archive (under 2GB) -> use .rar or .zip
