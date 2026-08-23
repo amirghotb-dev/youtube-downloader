@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 
 /**
- * Nintendo Switch Games Automated Sync & Upload Pipeline
+ * Nintendo Switch Games Automated Sync & Upload Pipeline with 2GB Multi-Part Splitting
  * 
  * Flow:
  * 1. Queries website API for pending NSWPedia games in queue (/api/v1/games/queue/pending)
  * 2. Scrapes metadata, cover, screenshots, and direct download mirrors using nswpedia_scraper.cjs
  * 3. Downloads Base Game, Updates, DLCs via high-speed pipeline (aria2 / stream)
- * 4. Uploads files to AbreHamrahi Cloud with structured folders (Nintendo_Switch/<Game_Title>/...)
- * 5. Cleans up local files to preserve runner disk space
- * 6. Sends public Hamrahi links and metadata back to website API (/api/v1/games/queue/complete)
+ * 4. Validates downloaded file (rejects HTML/403 error pages)
+ * 5. Packages & splits into 2GB password-protected parts (e.g. .zip.001, .zip.002) if > 2GB
+ * 6. Uploads all parts to AbreHamrahi Cloud with structured folders (Nintendo_Switch/<Game_Title>/...)
+ * 7. Cleans up local files to preserve runner disk space
+ * 8. Sends public Hamrahi links and part metadata back to website API (/api/v1/games/queue/complete)
  */
 
 const https = require('https');
@@ -51,70 +53,128 @@ const REFRESH_TOKEN = params['refresh-token'] || process.env.ABREHAMRAHI_REFRESH
 const DEST_DIR = params['dest-dir'] || path.join(process.cwd(), 'downloads');
 const SINGLE_URL = params['single-url'] || null;
 const ZIP_PASSWORD = params['zip-password'] || process.env.ZIP_PASSWORD || 'ninten2.ir';
+const PART_SIZE_MB = parseInt(params['part-size-mb'] || '2000', 10) || 2000; // 2GB parts
 
 /**
- * Package a downloaded file into a password-protected zip file
+ * Package and split file into 2GB password-protected parts if file exceeds 2GB (PART_SIZE_MB)
+ * Returns array of part file objects: [{ path, name, partNumber, totalParts, size }]
  */
-function createProtectedZip(sourceFilePath, outputZipPath, password = ZIP_PASSWORD) {
-    const sourceExt = path.extname(sourceFilePath).toLowerCase();
-    const tempExtractDir = path.join(path.dirname(sourceFilePath), `ext_${Date.now()}_${Math.floor(Math.random() * 1000)}`);
-    
-    let extracted = false;
+function createProtectedParts(sourceFilePath, destDir, baseName, password = ZIP_PASSWORD, splitSizeMb = PART_SIZE_MB) {
+    if (!fs.existsSync(sourceFilePath)) {
+        throw new Error(`Source file not found: ${sourceFilePath}`);
+    }
 
-    // Check if zip command is available
+    const stats = fs.statSync(sourceFilePath);
+    const totalSize = stats.size;
+    const splitSizeBytes = splitSizeMb * 1024 * 1024;
+    const cleanBaseName = sanitizeFilename(baseName.replace(/\.(zip|7z|nsp|xci|rar)$/i, ''));
+
+    let has7z = false;
     let hasZip = false;
-    try {
-        execSync('which zip', { stdio: 'ignore' });
-        hasZip = true;
-    } catch {}
+    try { execSync('which 7z || which 7za', { stdio: 'ignore' }); has7z = true; } catch {}
+    try { execSync('which zip', { stdio: 'ignore' }); hasZip = true; } catch {}
 
-    if (!hasZip) {
-        throw new Error('zip command line utility is not available on this system.');
-    }
+    const parts = [];
 
-    // Try extracting if it is a regular zip/rar/7z archive so the user gets clean internal files
-    if (['.zip', '.rar', '.7z'].includes(sourceExt)) {
-        try {
-            fs.mkdirSync(tempExtractDir, { recursive: true });
-            
-            let has7z = false;
-            try { execSync('which 7z', { stdio: 'ignore' }); has7z = true; } catch {}
-            
-            let hasUnzip = false;
-            try { execSync('which unzip', { stdio: 'ignore' }); hasUnzip = true; } catch {}
+    // Check if multi-part splitting is needed
+    if (totalSize > splitSizeBytes && (has7z || hasZip)) {
+        console.log(`    📦 File size (${formatBytes(totalSize)}) exceeds ${splitSizeMb}MB -> Splitting into ${splitSizeMb}MB parts...`);
+        const outputBase = path.join(destDir, `${cleanBaseName}.zip`);
 
-            if (sourceExt === '.zip' && hasUnzip) {
-                execSync(`unzip -q -o "${sourceFilePath}" -d "${tempExtractDir}"`, { stdio: 'ignore' });
-                extracted = true;
-            } else if (has7z) {
-                execSync(`7z x -y -o"${tempExtractDir}" "${sourceFilePath}"`, { stdio: 'ignore' });
-                extracted = true;
-            }
-        } catch (e) {
-            extracted = false;
+        // Clean up any previous parts with same prefix
+        const existingFiles = fs.readdirSync(destDir).filter(f => f.startsWith(`${cleanBaseName}.`));
+        for (const ef of existingFiles) {
+            try { fs.unlinkSync(path.join(destDir, ef)); } catch {}
         }
-    }
 
-    if (fs.existsSync(outputZipPath)) {
-        fs.unlinkSync(outputZipPath);
-    }
+        if (has7z) {
+            // 7z multi-volume zip format (.zip.001, .zip.002...)
+            const cmd = `7z a -tzip -v${splitSizeMb}m -mx=1 -p"${password}" "${outputBase}" "${sourceFilePath}"`;
+            execSync(cmd, { stdio: 'ignore' });
 
-    if (extracted) {
-        // Zip contents of extracted directory
-        const cmd = `cd "${tempExtractDir}" && zip -q -1 -r -P "${password}" "${outputZipPath}" .`;
-        execSync(cmd, { stdio: 'ignore' });
-        
-        // Clean extract dir
-        fs.rmSync(tempExtractDir, { recursive: true, force: true });
+            const createdFiles = fs.readdirSync(destDir)
+                .filter(f => f.startsWith(`${cleanBaseName}.zip.`))
+                .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+            if (createdFiles.length > 0) {
+                const totalParts = createdFiles.length;
+                for (let idx = 0; idx < createdFiles.length; idx++) {
+                    const partFile = createdFiles[idx];
+                    const partPath = path.join(destDir, partFile);
+                    const partStats = fs.statSync(partPath);
+                    parts.push({
+                        path: partPath,
+                        name: partFile,
+                        partNumber: idx + 1,
+                        totalParts: totalParts,
+                        size: partStats.size
+                    });
+                }
+            } else if (fs.existsSync(outputBase)) {
+                const outStats = fs.statSync(outputBase);
+                parts.push({
+                    path: outputBase,
+                    name: path.basename(outputBase),
+                    partNumber: 1,
+                    totalParts: 1,
+                    size: outStats.size
+                });
+            }
+        } else if (hasZip) {
+            // Standard zip split format (.z01, .z02, ... .zip)
+            const sourceDir = path.dirname(sourceFilePath);
+            const sourceBase = path.basename(sourceFilePath);
+            const cmd = `cd "${sourceDir}" && zip -q -1 -s ${splitSizeMb}m -P "${password}" "${outputBase}" "${sourceBase}"`;
+            execSync(cmd, { stdio: 'ignore' });
+
+            const createdFiles = fs.readdirSync(destDir)
+                .filter(f => f.startsWith(`${cleanBaseName}.z`) || f === `${cleanBaseName}.zip`)
+                .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+            const totalParts = createdFiles.length;
+            for (let idx = 0; idx < createdFiles.length; idx++) {
+                const partFile = createdFiles[idx];
+                const partPath = path.join(destDir, partFile);
+                const partStats = fs.statSync(partPath);
+                parts.push({
+                    path: partPath,
+                    name: partFile,
+                    partNumber: idx + 1,
+                    totalParts: totalParts,
+                    size: partStats.size
+                });
+            }
+        }
     } else {
-        // Zip the source file directly
-        const sourceDir = path.dirname(sourceFilePath);
-        const sourceBase = path.basename(sourceFilePath);
-        const cmd = `cd "${sourceDir}" && zip -q -1 -P "${password}" "${outputZipPath}" "${sourceBase}"`;
-        execSync(cmd, { stdio: 'ignore' });
+        // Single part archive
+        const outputZip = path.join(destDir, `${cleanBaseName}.zip`);
+        if (fs.existsSync(outputZip)) {
+            fs.unlinkSync(outputZip);
+        }
+
+        if (has7z) {
+            const cmd = `7z a -tzip -mx=1 -p"${password}" "${outputZip}" "${sourceFilePath}"`;
+            execSync(cmd, { stdio: 'ignore' });
+        } else if (hasZip) {
+            const sourceDir = path.dirname(sourceFilePath);
+            const sourceBase = path.basename(sourceFilePath);
+            const cmd = `cd "${sourceDir}" && zip -q -1 -P "${password}" "${outputZip}" "${sourceBase}"`;
+            execSync(cmd, { stdio: 'ignore' });
+        } else {
+            throw new Error('Neither 7z nor zip is available to compress ROMs.');
+        }
+
+        const outStats = fs.statSync(outputZip);
+        parts.push({
+            path: outputZip,
+            name: path.basename(outputZip),
+            partNumber: 1,
+            totalParts: 1,
+            size: outStats.size
+        });
     }
 
-    return outputZipPath;
+    return parts;
 }
 
 /**
@@ -138,26 +198,24 @@ function apiRequest(endpoint, method = 'GET', data = null) {
         }
 
         const headers = {
-            'X-SYNC-TOKEN': SYNC_TOKEN,
-            'Content-Type': 'application/json',
+            'User-Agent': 'Ninten2-Sync-Worker/2.0',
             'Accept': 'application/json',
-            'User-Agent': 'Ninten2-GitHub-Sync-Worker/1.0'
+            'X-SYNC-TOKEN': SYNC_TOKEN,
+            'Authorization': `Bearer ${SYNC_TOKEN}`
         };
 
         if (payload) {
+            headers['Content-Type'] = 'application/json';
             headers['Content-Length'] = payload.length;
         }
 
-        const reqOptions = {
+        const req = protocol.request({
             hostname: parsedUrl.hostname,
             port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
             path: parsedUrl.pathname + parsedUrl.search,
             method: method,
-            headers: headers,
-            rejectUnauthorized: false
-        };
-
-        const req = protocol.request(reqOptions, (res) => {
+            headers: headers
+        }, (res) => {
             let body = '';
             res.on('data', chunk => body += chunk);
             res.on('end', () => {
@@ -166,69 +224,57 @@ function apiRequest(endpoint, method = 'GET', data = null) {
                     if (res.statusCode >= 200 && res.statusCode < 300) {
                         resolve(parsed);
                     } else {
-                        reject(new Error(`API Error (HTTP ${res.statusCode}): ${parsed.message || body}`));
+                        reject(new Error(`API HTTP ${res.statusCode}: ${parsed.message || body}`));
                     }
                 } catch (e) {
                     if (res.statusCode >= 200 && res.statusCode < 300) {
                         resolve(body);
                     } else {
-                        reject(new Error(`HTTP ${res.statusCode}: ${body}`));
+                        reject(new Error(`API HTTP ${res.statusCode}: ${body}`));
                     }
                 }
             });
         });
 
         req.on('error', reject);
-
         if (payload) {
             req.write(payload);
         }
-
         req.end();
     });
 }
 
 /**
- * Resolve any HTTP 301/302 redirects to find the ultimate direct storage download URL
+ * Validate that downloaded file is a real game file and not an HTML error / 403 page
  */
-async function resolveFinalRedirectUrl(initialUrl, maxRedirects = 5) {
-    let currentUrl = initialUrl;
-    for (let i = 0; i < maxRedirects; i++) {
-        try {
-            const parsed = new URL(currentUrl);
-            const protocol = parsed.protocol === 'https:' ? https : http;
-            const res = await new Promise((resolve, reject) => {
-                const req = protocol.request(currentUrl, {
-                    method: 'GET',
-                    headers: {
-                        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                        'Range': 'bytes=0-10'
-                    }
-                }, resolve);
-                req.on('error', reject);
-                req.setTimeout(6000, () => { req.destroy(); resolve(null); });
-                req.end();
-            });
+function validateDownloadedRom(filePath) {
+    if (!fs.existsSync(filePath)) {
+        throw new Error(`Downloaded file does not exist: ${filePath}`);
+    }
 
-            if (res && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                currentUrl = new URL(res.headers.location, currentUrl).href;
-            } else {
-                break;
+    const stats = fs.statSync(filePath);
+    if (stats.size < 1048576) { // Less than 1MB
+        // Check if it is HTML
+        try {
+            const buf = Buffer.alloc(1024);
+            const fd = fs.openSync(filePath, 'r');
+            fs.readSync(fd, buf, 0, 1024, 0);
+            fs.closeSync(fd);
+            const str = buf.toString('utf-8').toLowerCase();
+            if (str.includes('<html') || str.includes('<!doctype html') || str.includes('403 forbidden') || str.includes('access denied')) {
+                throw new Error(`File is an HTML error page (${formatBytes(stats.size)}), not a valid ROM. Server returned 403 Forbidden or link expired.`);
             }
         } catch (e) {
-            break;
+            if (e.message.includes('HTML error page')) throw e;
         }
+        throw new Error(`Downloaded file is suspiciously small (${formatBytes(stats.size)}). Expected Nintendo Switch ROM (> 50MB).`);
     }
-    return currentUrl;
 }
 
 /**
- * Download a file via aria2c (if available) or fallback to internal stream downloader
+ * High-speed ROM file downloader (Aria2 preferred, fallback to stream)
  */
-async function downloadRomFile(url, targetPath) {
-    const finalUrl = await resolveFinalRedirectUrl(url);
-
-    // Check if aria2c is installed
+async function downloadRomFile(url, destPath) {
     let hasAria2 = false;
     try {
         execSync('which aria2c', { stdio: 'ignore' });
@@ -236,67 +282,37 @@ async function downloadRomFile(url, targetPath) {
     } catch {}
 
     if (hasAria2) {
-        console.log(`    ⚡ Downloading with aria2c (16 connections)...`);
-        const targetDir = path.dirname(targetPath);
-        const targetFile = path.basename(targetPath);
-        try {
-            const cmd = `aria2c -x 16 -s 16 -k 1M --allow-overwrite=true --auto-file-renaming=false --file-allocation=none --dir="${targetDir}" --out="${targetFile}" "${finalUrl}"`;
-            execSync(cmd, { stdio: 'inherit' });
-        } catch (ariaErr) {
-            console.warn(`    ⚠️ aria2c encountered an issue, falling back to direct stream download...`);
-        }
+        console.log(`    ⚡ Downloading via Aria2 Multi-Connection Accelerator: ${url}`);
+        const destDir = path.dirname(destPath);
+        const destFile = path.basename(destPath);
 
-        if (fs.existsSync(targetPath)) {
-            const stats = fs.statSync(targetPath);
-            // Check if downloaded file is accidentally an HTML error/redirect page
-            if (stats.size < 150 * 1024) {
-                try {
-                    const sample = fs.readFileSync(targetPath, 'utf8').substring(0, 500);
-                    if (sample.includes('<html') || sample.includes('<!DOCTYPE') || sample.includes('Redirecting') || sample.includes('Cloudflare')) {
-                        console.warn(`    ⚠️ Downloaded file is an HTML redirect/error page (${stats.size} bytes). Re-downloading with stream...`);
-                        fs.unlinkSync(targetPath);
-                    }
-                } catch {}
-            }
-        }
-    }
+        const ariaCmd = `aria2c -x 16 -s 16 -k 1M --file-allocation=none --dir="${destDir}" --out="${destFile}" "${url}"`;
+        execSync(ariaCmd, { stdio: 'inherit' });
 
-    if (!fs.existsSync(targetPath)) {
-        console.log(`    📥 Downloading via Node.js high-speed stream...`);
-        let lastRender = 0;
-        return await downloadFile(finalUrl, targetPath, {
-            onProgress: (prog) => {
-                const now = Date.now();
-                if (now - lastRender >= 300 || prog.percentage === 100) {
-                    lastRender = now;
-                    const pct = prog.percentage.toFixed(1);
-                    const downStr = formatBytes(prog.downloadedBytes);
-                    const totalStr = formatBytes(prog.totalBytes);
-                    const speedStr = formatBytes(prog.speedBytesPerSec) + '/s';
-                    process.stdout.write(`\r    [${pct}%] ${downStr}/${totalStr} | ⚡ ${speedStr}   `);
-                }
+        validateDownloadedRom(destPath);
+        const stats = fs.statSync(destPath);
+        return {
+            destPath,
+            totalBytes: stats.size
+        };
+    } else {
+        console.log(`    📥 Downloading via Node.js Stream Pipeline: ${url}`);
+        const dlRes = await downloadFile(url, destPath, {
+            onProgress: (p) => {
+                process.stdout.write(`\r⏳ Downloading: ${p.percent}% [${formatBytes(p.downloaded)} / ${formatBytes(p.total)}] @ ${formatBytes(p.speed)}/s`);
             }
         });
+        console.log('');
+        validateDownloadedRom(destPath);
+        return dlRes;
     }
-
-    const finalStats = fs.statSync(targetPath);
-    return {
-        destPath: targetPath,
-        totalBytes: finalStats.size
-    };
 }
 
-/**
- * Clean and format clean directory folder name
- */
 function cleanFolderName(title) {
-    let clean = (title || 'Nintendo_Switch_Game')
-        .replace(/^Download\s+/i, '')
-        .replace(/\s*(?:NSP|XCI|NSZ|Full Game|\+ Update|Update|DLC|Homebrew Port|Homebrew|Port|v\d+[\.\d]*)\b/gi, '')
+    return (title || 'Game')
         .replace(/[^a-zA-Z0-9_\- ]/g, '')
         .trim()
         .replace(/\s+/g, '_');
-    return clean || 'Nintendo_Switch_Game';
 }
 
 /**
@@ -305,6 +321,7 @@ function cleanFolderName(title) {
 async function run() {
     console.log('===============================================================');
     console.log('🚀 Ninten2 Nintendo Switch Games Sync & Auto-Uploader Pipeline');
+    console.log(`📦 Multi-Part Splitting Threshold: ${PART_SIZE_MB} MB (2 GB)`);
     console.log('===============================================================');
     console.log(`🌐 Target Website API: ${API_BASE_URL}`);
 
@@ -392,7 +409,6 @@ async function run() {
             console.log(`    Mirrors:   ${gameData.downloads.length} mirror link(s) found\n`);
 
             // 4. Select candidate download files
-            // Filter direct links (prioritize Vikingfile/Direct, then 1Fichier, then Datanodes)
             const availableDownloads = gameData.downloads.filter(d => d.directUrl && !d.directUrl.includes('placeholder'));
 
             // Sort: prioritize Vikingfile
@@ -430,7 +446,7 @@ async function run() {
                 console.log(`    Type:   ${fileItem.type} | Format: ${fileItem.format || 'NSP'}`);
                 console.log(`    Source: ${fileItem.directUrl}`);
 
-                const finalZipName = generateRomFilename(gameData.title, fileItem, '.zip');
+                const baseZipName = generateRomFilename(gameData.title, fileItem, '.zip');
                 const subFolder = fileItem.type === 'Base Game' ? 'Base_Game' : (fileItem.type === 'Update' ? 'Updates' : 'DLC');
                 const targetHamrahiFolder = `${gameFolderName}/${subFolder}`;
 
@@ -443,10 +459,13 @@ async function run() {
 
                     // Candidate filenames to check in AbreHamrahi before downloading
                     const candidateNames = [
-                        finalZipName,
+                        baseZipName,
+                        `${baseZipName}.001`,
+                        `${baseZipName.replace(/\.zip$/i, '')}.zip.001`,
+                        `${baseZipName.replace(/\.zip$/i, '')}.z01`,
                         fileItem.name,
-                        finalZipName.replace(/\.zip$/i, '.nsp'),
-                        finalZipName.replace(/\.zip$/i, '.xci'),
+                        baseZipName.replace(/\.zip$/i, '.nsp'),
+                        baseZipName.replace(/\.zip$/i, '.xci'),
                         fileItem.name.replace(/\.[a-zA-Z0-9]+$/, '') + '.zip',
                         `${cleanFolderName(gameData.title)}_${subFolder}.zip`,
                         `${cleanFolderName(gameData.title)}.zip`
@@ -454,9 +473,39 @@ async function run() {
 
                     // Check if file already exists in AbreHamrahi
                     console.log(`    🔍 Checking if file already exists on AbreHamrahi Cloud...`);
-                    let uploadResult = await findExistingFileInHamrahi(currentAccessToken, folderId, candidateNames, REFRESH_TOKEN);
+                    let existingCloudFile = await findExistingFileInHamrahi(currentAccessToken, folderId, candidateNames, REFRESH_TOKEN);
 
-                    if (!uploadResult) {
+                    let fileTypeKey = 'base_game';
+                    if (fileItem.type === 'Update') fileTypeKey = 'update';
+                    else if (fileItem.type === 'DLC') fileTypeKey = 'dlc';
+
+                    let baseDisplayTitle = `${cleanGameTitle(gameData.title).replace(/_/g, ' ')}`;
+                    if (fileItem.type === 'Base Game') {
+                        baseDisplayTitle += ' - نسخه اصلی بازی';
+                    } else if (fileItem.type === 'Update') {
+                        baseDisplayTitle += ` - آپدیت ${fileItem.version || ''}`.trim();
+                    } else if (fileItem.type === 'DLC') {
+                        baseDisplayTitle += ' - بسته الحاقی (DLC)';
+                    }
+
+                    if (existingCloudFile) {
+                        console.log(`    ⚡ [CACHE HIT] Reusing existing cloud file without re-downloading: ${existingCloudFile.public_url}`);
+                        uploadedFiles.push({
+                            file_type: fileTypeKey,
+                            title: existingCloudFile.name,
+                            display_title: baseDisplayTitle,
+                            version: fileItem.version || 'v1.0.0',
+                            file_size: formatBytes(existingCloudFile.size),
+                            file_format: 'ZIP',
+                            password: ZIP_PASSWORD,
+                            part_number: 1,
+                            total_parts: 1,
+                            server_name: 'سرور اختصاصی مستقیم ابر همراهی (نیم‌بها)',
+                            download_url: existingCloudFile.public_url,
+                            folder_path: targetHamrahiFolder,
+                            hamrahi_id: existingCloudFile.id,
+                        });
+                    } else {
                         console.log(`    📥 File not found in cloud. Starting download from source: ${fileItem.directUrl}`);
                         // Step A: Determine clean temp filename
                         const tempExt = fileItem.format ? `.${fileItem.format.toLowerCase()}` : '.nsp';
@@ -468,59 +517,55 @@ async function run() {
                         const dlResult = await downloadRomFile(fileItem.directUrl, tempLocalFilePath);
                         console.log(`\n    ✅ Downloaded successfully: ${formatBytes(dlResult.totalBytes)}`);
 
-                        // Step C: Package & encrypt into password-protected zip file
-                        const protectedZipPath = path.join(DEST_DIR, finalZipName);
-                        console.log(`    🔒 Packaging into protected Zip with password '${ZIP_PASSWORD}' -> ${finalZipName}...`);
-                        createProtectedZip(tempLocalFilePath, protectedZipPath, ZIP_PASSWORD);
-                        const zipStats = fs.statSync(protectedZipPath);
-                        console.log(`    ✅ Protected Zip ready: ${formatBytes(zipStats.size)}`);
+                        // Step C: Package & split into 2GB password-protected parts
+                        console.log(`    🔒 Packaging and checking 2GB splitting with password '${ZIP_PASSWORD}'...`);
+                        const generatedParts = createProtectedParts(tempLocalFilePath, DEST_DIR, baseZipName, ZIP_PASSWORD, PART_SIZE_MB);
+                        console.log(`    📦 Generated ${generatedParts.length} part(s).`);
 
-                        // Step D: Upload to AbreHamrahi Cloud
-                        console.log(`    ☁️ Uploading to AbreHamrahi (${finalZipName})...`);
-                        uploadResult = await uploadFileToHamrahi(currentAccessToken, protectedZipPath, folderId, finalZipName, REFRESH_TOKEN);
-                        console.log(`    🎉 Upload Complete! Public Link: ${uploadResult.public_url}`);
-
-                        // Step E: Clean up temporary local files
+                        // Clean up temporary downloaded source file
                         if (fs.existsSync(tempLocalFilePath)) {
                             fs.unlinkSync(tempLocalFilePath);
                         }
-                        if (fs.existsSync(protectedZipPath)) {
-                            fs.unlinkSync(protectedZipPath);
-                            console.log(`    🧹 Cleaned up temporary local files: ${finalZipName}`);
+
+                        // Step D: Upload all parts to AbreHamrahi Cloud
+                        for (let pIdx = 0; pIdx < generatedParts.length; pIdx++) {
+                            const part = generatedParts[pIdx];
+                            console.log(`    ☁️ Uploading Part ${part.partNumber}/${part.totalParts}: "${part.name}" (${formatBytes(part.size)})...`);
+
+                            let partUploadResult = await findExistingFileInHamrahi(currentAccessToken, folderId, [part.name], REFRESH_TOKEN);
+                            if (!partUploadResult) {
+                                partUploadResult = await uploadFileToHamrahi(currentAccessToken, part.path, folderId, part.name, REFRESH_TOKEN);
+                            }
+                            console.log(`    🎉 Part ${part.partNumber} Uploaded! Public Link: ${partUploadResult.public_url}`);
+
+                            let partTitle = baseDisplayTitle;
+                            if (part.totalParts > 1) {
+                                partTitle += ` (پارت ${part.partNumber} از ${part.totalParts})`;
+                            }
+
+                            uploadedFiles.push({
+                                file_type: fileTypeKey,
+                                title: part.name,
+                                display_title: partTitle,
+                                version: fileItem.version || 'v1.0.0',
+                                file_size: formatBytes(partUploadResult.size),
+                                file_format: 'ZIP',
+                                password: ZIP_PASSWORD,
+                                part_number: part.partNumber,
+                                total_parts: part.totalParts,
+                                server_name: 'سرور اختصاصی مستقیم ابر همراهی (نیم‌بها)',
+                                download_url: partUploadResult.public_url,
+                                folder_path: targetHamrahiFolder,
+                                hamrahi_id: partUploadResult.id,
+                            });
+
+                            // Clean up local part file
+                            if (fs.existsSync(part.path)) {
+                                fs.unlinkSync(part.path);
+                            }
                         }
-                    } else {
-                        console.log(`    ⚡ [CACHE HIT] Reusing existing cloud file without re-downloading: ${uploadResult.public_url}`);
+                        console.log(`    🧹 Cleaned up temporary local part files.`);
                     }
-
-                    // Step F: Record file metadata
-                    let fileTypeKey = 'base_game';
-                    if (fileItem.type === 'Update') fileTypeKey = 'update';
-                    else if (fileItem.type === 'DLC') fileTypeKey = 'dlc';
-
-                    let displayTitle = `${cleanGameTitle(gameData.title).replace(/_/g, ' ')}`;
-                    if (fileItem.type === 'Base Game') {
-                        displayTitle += ' - نسخه اصلی بازی';
-                    } else if (fileItem.type === 'Update') {
-                        displayTitle += ` - آپدیت ${fileItem.version || ''}`.trim();
-                    } else if (fileItem.type === 'DLC') {
-                        displayTitle += ' - بسته الحاقی (DLC)';
-                    }
-
-                    uploadedFiles.push({
-                        file_type: fileTypeKey,
-                        title: finalZipName,
-                        display_title: displayTitle,
-                        version: fileItem.version || 'v1.0.0',
-                        file_size: formatBytes(uploadResult.size),
-                        file_format: 'ZIP',
-                        password: ZIP_PASSWORD,
-                        part_number: 1,
-                        total_parts: 1,
-                        server_name: 'سرور اختصاصی مستقیم ابر همراهی (نیم‌بها)',
-                        download_url: uploadResult.public_url,
-                        folder_path: targetHamrahiFolder,
-                        hamrahi_id: uploadResult.id,
-                    });
 
                 } catch (fileErr) {
                     console.error(`\n    ⚠️ Warning: Failed processing file ${fileItem.name}: ${fileErr.message}`);
