@@ -8,7 +8,7 @@
  * 2. Scrapes metadata, cover, screenshots, and direct download mirrors using nswpedia_scraper.cjs
  * 3. Downloads Base Game, Updates, DLCs via high-speed pipeline (aria2 / stream)
  * 4. Validates downloaded file (rejects HTML/403 error pages)
- * 5. Packages & splits into 2GB password-protected parts (e.g. .zip.001, .zip.002) if > 2GB
+ * 5. Packages & splits into 2GB password-protected parts (e.g. .7z.001, .7z.002) if > 2GB
  * 6. Uploads all parts to AbreHamrahi Cloud with structured folders (Nintendo_Switch/<Game_Title>/...)
  * 7. Cleans up local files to preserve runner disk space
  * 8. Sends public Hamrahi links and part metadata back to website API (/api/v1/games/queue/complete)
@@ -57,7 +57,7 @@ const PART_SIZE_MB = parseInt(params['part-size-mb'] || '2000', 10) || 2000; // 
 
 /**
  * Package and split file into 2GB password-protected parts if file exceeds 2GB (PART_SIZE_MB)
- * Returns array of part file objects: [{ path, name, partNumber, totalParts, size }]
+ * Returns array of part file objects: [{ path, name, partNumber, totalParts, size, format }]
  */
 function createProtectedParts(sourceFilePath, destDir, baseName, password = ZIP_PASSWORD, splitSizeMb = PART_SIZE_MB) {
     if (!fs.existsSync(sourceFilePath)) {
@@ -76,10 +76,9 @@ function createProtectedParts(sourceFilePath, destDir, baseName, password = ZIP_
 
     const parts = [];
 
-    // Check if multi-part splitting is needed
+    // Check if multi-part splitting is needed (> 2000MB)
     if (totalSize > splitSizeBytes && (has7z || hasZip)) {
         console.log(`    📦 File size (${formatBytes(totalSize)}) exceeds ${splitSizeMb}MB -> Splitting into ${splitSizeMb}MB parts...`);
-        const outputBase = path.join(destDir, `${cleanBaseName}.zip`);
 
         // Clean up any previous parts with same prefix
         const existingFiles = fs.readdirSync(destDir).filter(f => f.startsWith(`${cleanBaseName}.`));
@@ -88,12 +87,14 @@ function createProtectedParts(sourceFilePath, destDir, baseName, password = ZIP_
         }
 
         if (has7z) {
-            // 7z multi-volume zip format (.zip.001, .zip.002...)
-            const cmd = `7z a -tzip -v${splitSizeMb}m -mx=1 -p"${password}" "${outputBase}" "${sourceFilePath}"`;
+            // Note: 7-Zip creates split volumes using 7z format (-v).
+            // It generates .7z.001, .7z.002, etc., fully compatible with WinRAR, 7-Zip, Bandizip, ZArchiver.
+            const outputBase = path.join(destDir, `${cleanBaseName}.7z`);
+            const cmd = `7z a -v${splitSizeMb}m -mx=1 -p"${password}" "${outputBase}" "${sourceFilePath}"`;
             execSync(cmd, { stdio: 'ignore' });
 
             const createdFiles = fs.readdirSync(destDir)
-                .filter(f => f.startsWith(`${cleanBaseName}.zip.`))
+                .filter(f => f.startsWith(`${cleanBaseName}.7z.`))
                 .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
             if (createdFiles.length > 0) {
@@ -107,7 +108,8 @@ function createProtectedParts(sourceFilePath, destDir, baseName, password = ZIP_
                         name: partFile,
                         partNumber: idx + 1,
                         totalParts: totalParts,
-                        size: partStats.size
+                        size: partStats.size,
+                        format: '7Z'
                     });
                 }
             } else if (fs.existsSync(outputBase)) {
@@ -117,11 +119,13 @@ function createProtectedParts(sourceFilePath, destDir, baseName, password = ZIP_
                     name: path.basename(outputBase),
                     partNumber: 1,
                     totalParts: 1,
-                    size: outStats.size
+                    size: outStats.size,
+                    format: '7Z'
                 });
             }
         } else if (hasZip) {
             // Standard zip split format (.z01, .z02, ... .zip)
+            const outputBase = path.join(destDir, `${cleanBaseName}.zip`);
             const sourceDir = path.dirname(sourceFilePath);
             const sourceBase = path.basename(sourceFilePath);
             const cmd = `cd "${sourceDir}" && zip -q -1 -s ${splitSizeMb}m -P "${password}" "${outputBase}" "${sourceBase}"`;
@@ -141,12 +145,13 @@ function createProtectedParts(sourceFilePath, destDir, baseName, password = ZIP_
                     name: partFile,
                     partNumber: idx + 1,
                     totalParts: totalParts,
-                    size: partStats.size
+                    size: partStats.size,
+                    format: 'ZIP'
                 });
             }
         }
     } else {
-        // Single part archive
+        // Single part archive (under 2GB) -> use standard .zip
         const outputZip = path.join(destDir, `${cleanBaseName}.zip`);
         if (fs.existsSync(outputZip)) {
             fs.unlinkSync(outputZip);
@@ -170,7 +175,8 @@ function createProtectedParts(sourceFilePath, destDir, baseName, password = ZIP_
             name: path.basename(outputZip),
             partNumber: 1,
             totalParts: 1,
-            size: outStats.size
+            size: outStats.size,
+            format: 'ZIP'
         });
     }
 
@@ -447,6 +453,7 @@ async function run() {
                 console.log(`    Source: ${fileItem.directUrl}`);
 
                 const baseZipName = generateRomFilename(gameData.title, fileItem, '.zip');
+                const cleanBaseName = baseZipName.replace(/\.zip$/i, '');
                 const subFolder = fileItem.type === 'Base Game' ? 'Base_Game' : (fileItem.type === 'Update' ? 'Updates' : 'DLC');
                 const targetHamrahiFolder = `${gameFolderName}/${subFolder}`;
 
@@ -460,9 +467,10 @@ async function run() {
                     // Candidate filenames to check in AbreHamrahi before downloading
                     const candidateNames = [
                         baseZipName,
-                        `${baseZipName}.001`,
-                        `${baseZipName.replace(/\.zip$/i, '')}.zip.001`,
-                        `${baseZipName.replace(/\.zip$/i, '')}.z01`,
+                        `${cleanBaseName}.7z.001`,
+                        `${cleanBaseName}.7z`,
+                        `${cleanBaseName}.zip.001`,
+                        `${cleanBaseName}.zip`,
                         fileItem.name,
                         baseZipName.replace(/\.zip$/i, '.nsp'),
                         baseZipName.replace(/\.zip$/i, '.xci'),
@@ -496,7 +504,7 @@ async function run() {
                             display_title: baseDisplayTitle,
                             version: fileItem.version || 'v1.0.0',
                             file_size: formatBytes(existingCloudFile.size),
-                            file_format: 'ZIP',
+                            file_format: existingCloudFile.name.endsWith('.7z') || existingCloudFile.name.includes('.7z.') ? '7Z' : 'ZIP',
                             password: ZIP_PASSWORD,
                             part_number: 1,
                             total_parts: 1,
@@ -549,7 +557,7 @@ async function run() {
                                 display_title: partTitle,
                                 version: fileItem.version || 'v1.0.0',
                                 file_size: formatBytes(partUploadResult.size),
-                                file_format: 'ZIP',
+                                file_format: part.format || '7Z',
                                 password: ZIP_PASSWORD,
                                 part_number: part.partNumber,
                                 total_parts: part.totalParts,
