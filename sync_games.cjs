@@ -53,7 +53,7 @@ const REFRESH_TOKEN = params['refresh-token'] || process.env.ABREHAMRAHI_REFRESH
 const DEST_DIR = params['dest-dir'] || path.join(process.cwd(), 'downloads');
 const SINGLE_URL = params['single-url'] || null;
 const ZIP_PASSWORD = params['zip-password'] || process.env.ZIP_PASSWORD || 'ninten2.ir';
-const PART_SIZE_MB = parseInt(params['part-size-mb'] || '2000', 10) || 2000; // 2GB parts
+const PART_SIZE_MB = parseInt(params['part-size-mb'] || '2048', 10) || 2048; // 2GB (2048MB) parts
 const BATCH_LIMIT = parseInt(params['limit'] || '50', 10) || 50;
 
 /**
