@@ -18,6 +18,17 @@ jobs:
     timeout-minutes: 180
 
     steps:
+      - name: 🧹 Free Disk Space (Maximize Runner Space)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
 

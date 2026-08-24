@@ -325,7 +325,7 @@ async function downloadRomFile(url, destPath) {
         const destDir = path.dirname(destPath);
         const destFile = path.basename(destPath);
 
-        const ariaCmd = `aria2c -x 16 -s 16 -k 1M --file-allocation=none --dir="${destDir}" --out="${destFile}" "${url}"`;
+        const ariaCmd = `aria2c -x 8 -s 8 -j 1 -k 1M --max-connection-per-server=8 --retry-wait=3 --file-allocation=none --dir="${destDir}" --out="${destFile}" "${url}"`;
         execSync(ariaCmd, { stdio: 'inherit' });
 
         validateDownloadedRom(destPath);
