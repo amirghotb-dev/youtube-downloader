@@ -585,6 +585,45 @@ async function uploadFileToHamrahi(accessToken, filePath, parentFolderId = null,
     };
 }
 
+/**
+ * Delete a file or object from AbreHamrahi Cloud Storage
+ */
+async function deleteObjectInHamrahi(accessToken, objectId, refreshToken = null) {
+    if (!objectId) return false;
+    let activeToken = accessToken;
+
+    let delRes = await request({
+        hostname: 'abrehamrahi.ir',
+        path: `/api/v2/flat/delete-object/`,
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${activeToken}`,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        }
+    }, { obj_id: objectId });
+
+    if ((delRes.status === 401 || (delRes.body && delRes.body.code === 'token_not_valid')) && refreshToken) {
+        activeToken = await getAccessToken(refreshToken);
+        delRes = await request({
+            hostname: 'abrehamrahi.ir',
+            path: `/api/v2/flat/delete-object/`,
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${activeToken}`,
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            }
+        }, { obj_id: objectId });
+    }
+
+    if (delRes.status === 200 || delRes.status === 204) {
+        console.log(`    🗑️ Deleted existing/incomplete file from AbreHamrahi (ID: ${objectId})`);
+        return true;
+    }
+    return false;
+}
+
 // CLI Execution Support
 async function main() {
     const args = process.argv.slice(2);
@@ -651,5 +690,6 @@ module.exports = {
     getAccessToken,
     resolveFolderPath,
     findExistingFileInHamrahi,
-    uploadFileToHamrahi
+    uploadFileToHamrahi,
+    deleteObjectInHamrahi
 };

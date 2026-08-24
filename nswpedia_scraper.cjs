@@ -179,7 +179,26 @@ function generateRomFilename(gameTitle, item, extOverride = null) {
         const ver = item.version && item.version !== 'Update' ? `_${item.version}` : '_Update';
         typeSuffix = ver;
     } else if (item.type === 'DLC') {
-        typeSuffix = '_DLC';
+        if (!isGeneric && raw.length > 2) {
+            // Clean DLC name: Mario + Rabbids: Weapon Packs -> DLC_Weapon_Packs
+            let cleanDlcPart = raw
+                .replace(/^Download\s+/i, '')
+                .replace(/\.(nsp|xci|nsz|rar|zip|7z)$/i, '')
+                .replace(/[^a-zA-Z0-9_\- ]/g, ' ')
+                .trim()
+                .replace(/\s+/g, '_');
+            
+            // Remove game title prefix if present inside DLC name
+            const baseClean = base.replace(/_/g, '').toLowerCase();
+            const dlcClean = cleanDlcPart.replace(/_/g, '').toLowerCase();
+            if (dlcClean.startsWith(baseClean)) {
+                cleanDlcPart = cleanDlcPart.substring(base.length).replace(/^_+/, '');
+            }
+            
+            typeSuffix = `_DLC_${cleanDlcPart || 'Pack'}`.replace(/_+/g, '_');
+        } else {
+            typeSuffix = '_DLC';
+        }
     }
 
     return `${base}${typeSuffix}${ext}`;
@@ -216,7 +235,7 @@ function parseRomItemDetails(title, formatHint = '') {
         } else {
             version = 'Update';
         }
-    } else if (/dlc/i.test(raw) || /pack/i.test(raw) || /expansion/i.test(raw) || /unlocker/i.test(raw)) {
+    } else if (/dlc/i.test(raw) || /pack/i.test(raw) || /expansion/i.test(raw) || /unlocker/i.test(raw) || /challenge/i.test(raw) || /story/i.test(raw) || /costume/i.test(raw) || /weapon/i.test(raw) || /bonus/i.test(raw) || /adventure/i.test(raw)) {
         type = 'DLC';
         version = 'DLC';
     } else if (/base/i.test(raw) || /main/i.test(raw)) {

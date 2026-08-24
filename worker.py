@@ -46,6 +46,13 @@ def download_video(url, output_dir, cookie_path=None):
         'quiet': False,
         'no_warnings': False,
         'remote_components': ['ejs:github'],
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'tv_embedded', 'web_creator', 'web'],
+                'player_skip': ['webpage', 'configs'],
+            }
+        },
+        'age_limit': 99,
     }
 
     # در صورت وجود فایل کوکی اختصاصی
