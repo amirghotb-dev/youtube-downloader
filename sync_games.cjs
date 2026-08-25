@@ -452,14 +452,15 @@ function getMirrorScore(url) {
     if (!url) return -999;
     const u = url.toLowerCase();
     if (u.includes('nswpediax.site') || u.includes('invalid') || u.includes('placeholder')) return -100;
+    if (u.includes('dlsitex.online')) return 110;
     if (u.includes('vikingfile.com')) return 100;
-    if (u.includes('datanodes.to')) return 90;
     if (u.includes('1fichier.com')) return 85;
     if (u.includes('mediafire.com')) return 80;
     if (u.includes('megaup.net')) return 75;
     if (u.includes('gofile.io')) return 70;
-    if (u.includes('rushupload.com')) return 65;
-    if (u.includes('multiup.')) return 60;
+    if (u.includes('datanodes.to')) return 50; // Datanodes free web requires browser countdown
+    if (u.includes('rushupload.com')) return 40;
+    if (u.includes('multiup.')) return 30;
     return 10;
 }
 

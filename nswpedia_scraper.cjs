@@ -462,16 +462,22 @@ async function getLatestGames(page = 1, limit = 12, source = 'all') {
 }
 
 /**
- * Resolve direct download storage link from intermediate NSWPedia download URL
+ * Resolve direct download storage link from intermediate NSWPedia / NSVault / Dlsitex download URL
  */
-async function resolveDirectDownloadLink(downloadListUrl) {
+async function resolveDirectDownloadLink(downloadListUrl, options = {}) {
     try {
-        const res = await fetchUrl(downloadListUrl);
+        const res = await fetchUrl(downloadListUrl, options);
         const html = res.body;
 
-        const directMatch = html.match(/href=['"](https?:\/\/(?:vikingfile|1fichier|datanodes|multiup|rushupload|mediafire|mega|megaup|drive\.google)[^'"]+)['"]/i);
+        // 1. Direct storage servers and mirrors (including Dlsitex high speed storage, Vikingfile, 1Fichier, Mediafire, etc.)
+        const directMatch = html.match(/href=['"](https?:\/\/(?:s\d+\.dlsitex\.online|vikingfile|1fichier|datanodes|multiup|rushupload|mediafire|mega|megaup|drive\.google)[^'"]+)['"]/i);
 
-        const match = html.match(/<a[^>]+id=['"]download-link['"][^>]+href=['"]([^'"]+)['"]/i) ||
+        // 2. Button with class btn-download or id download-link
+        const btnMatch = html.match(/<a\b[^>]*\bclass=['"][^'"]*btn-download[^'"]*['"][^>]*\bhref=['"]([^'"]+)['"]/i) ||
+                         html.match(/<a\b[^>]*\bhref=['"]([^'"]+)['"][^>]*\bclass=['"][^'"]*btn-download[^'"]*['"]/i);
+
+        const match = btnMatch ||
+                      html.match(/<a[^>]+id=['"]download-link['"][^>]+href=['"]([^'"]+)['"]/i) ||
                       html.match(/id=['"]download-link['"][^>]*\s+href=['"]([^'"]+)['"]/i) ||
                       html.match(/href=['"]([^'"]+)['"][^>]*id=['"]download-link['"]/i);
 
