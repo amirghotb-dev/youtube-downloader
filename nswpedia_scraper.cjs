@@ -659,22 +659,39 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
     let cover = null;
     let banner = null;
 
-    // Check main post thumbnail image (handle any attribute order)
-    const postImgMatch = mainHtml.match(/<img\b[^>]*\bclass=['"][^'"]*(?:wp-post-image|attachment-post-thumbnail|attachment-thumbnail)[^'"]*['"][^>]*\bsrc=['"]([^'"]+)['"]/i) ||
-                         mainHtml.match(/<img\b[^>]*\bsrc=['"]([^'"]+)['"][^>]*\bclass=['"][^'"]*(?:wp-post-image|attachment-post-thumbnail|attachment-thumbnail)[^'"]*['"]/i) ||
-                         dlHtml.match(/<img\b[^>]*\bsrc=['"]([^'"]+)['"][^>]*\bclass=['"][^'"]*(?:wp-post-image|attachment-post-thumbnail|attachment-thumbnail)[^'"]*['"]/i) ||
-                         mainHtml.match(/<img\b[^>]*\bsrc=['"]([^'"]+(?:cover|boxart)[^'"]*)['"]/i);
+    // Check og:image first as both NSWPedia and NSVault provide the exact official game cover in og:image
+    const ogMatch = mainHtml.match(/<meta\s+property=['"]og:image['"]\s+content=['"]([^'"]+)['"]/i) ||
+                    mainHtml.match(/<meta\s+content=['"]([^'"]+)['"]\s+property=['"]og:image['"]/i) ||
+                    dlHtml.match(/<meta\s+property=['"]og:image['"]\s+content=['"]([^'"]+)['"]/i);
+    if (ogMatch && !/logo|default|placeholder/i.test(ogMatch[1])) {
+        cover = ogMatch[1];
+    }
 
-    if (postImgMatch) {
-        cover = postImgMatch[1] || postImgMatch[2];
-        const fullImgTag = postImgMatch[0];
-        const srcsetMatch = fullImgTag.match(/srcset=['"]([^'"]+)['"]/i);
-        if (srcsetMatch) {
-            const sources = srcsetMatch[1].split(',').map(s => s.trim().split(/\s+/));
-            if (sources.length > 0) {
-                sources.sort((a, b) => (parseInt(b[1]) || 0) - (parseInt(a[1]) || 0));
-                if (sources[0] && sources[0][0]) {
-                    cover = sources[0][0];
+    // Check specific cover art image tag (NSVault main cover art)
+    if (!cover) {
+        const coverArtMatch = mainHtml.match(/<img\b[^>]*\balt=['"][^'"]*cover art[^'"]*['"][^>]*\bsrc=['"]([^'"]+)['"]/i) ||
+                              mainHtml.match(/<img\b[^>]*\bsrc=['"]([^'"]+)['"][^>]*\balt=['"][^'"]*cover art[^'"]*['"]/i);
+        if (coverArtMatch) {
+            cover = coverArtMatch[1];
+        }
+    }
+
+    // Check post thumbnail image (WordPress post-thumbnail / wp-post-image)
+    if (!cover) {
+        const postImgMatch = mainHtml.match(/<img\b[^>]*\bclass=['"][^'"]*(?:wp-post-image|attachment-post-thumbnail|post-thumb)[^'"]*['"][^>]*\bsrc=['"]([^'"]+)['"]/i) ||
+                             mainHtml.match(/<img\b[^>]*\bsrc=['"]([^'"]+)['"][^>]*\bclass=['"][^'"]*(?:wp-post-image|attachment-post-thumbnail|post-thumb)[^'"]*['"]/i) ||
+                             dlHtml.match(/<img\b[^>]*\bsrc=['"]([^'"]+)['"][^>]*\bclass=['"][^'"]*(?:wp-post-image|attachment-post-thumbnail|post-thumb)[^'"]*['"]/i);
+        if (postImgMatch) {
+            cover = postImgMatch[1];
+            const fullImgTag = postImgMatch[0];
+            const srcsetMatch = fullImgTag.match(/srcset=['"]([^'"]+)['"]/i);
+            if (srcsetMatch) {
+                const sources = srcsetMatch[1].split(',').map(s => s.trim().split(/\s+/));
+                if (sources.length > 0) {
+                    sources.sort((a, b) => (parseInt(b[1]) || 0) - (parseInt(a[1]) || 0));
+                    if (sources[0] && sources[0][0]) {
+                        cover = sources[0][0];
+                    }
                 }
             }
         }
@@ -685,24 +702,20 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
                         mainHtml.match(/background-image:\s*url\(['"]?([^'"\)]+banner[^'"\)]*)['"]?\)/i);
     if (bannerMatch) {
         banner = bannerMatch[1];
-    }
-
-    // Also look for og:image
-    const ogMatch = mainHtml.match(/<meta\s+property=['"]og:image['"]\s+content=['"]([^'"]+)['"]/i) ||
-                    mainHtml.match(/<meta\s+content=['"]([^'"]+)['"]\s+property=['"]og:image['"]/i) ||
-                    dlHtml.match(/<meta\s+property=['"]og:image['"]\s+content=['"]([^'"]+)['"]/i);
-    if (ogMatch) {
-        if (!banner) banner = ogMatch[1];
-        if (!cover) cover = ogMatch[1];
+    } else if (cover) {
+        banner = cover;
     }
 
     if (!cover) {
         cover = banner;
     }
 
-    // Clean thumbnail dimension suffix (-300x400.jpg -> .jpg) to get pristine full-size cover
+    // Clean thumbnail dimension suffix (-300x400.jpg / -300x489.png -> .ext) to get pristine full-size cover
     if (cover) {
         cover = cover.replace(/-\d+x\d+(\.[a-zA-Z0-9]+)$/, '$1');
+    }
+    if (banner) {
+        banner = banner.replace(/-\d+x\d+(\.[a-zA-Z0-9]+)$/, '$1');
     }
 
     // 4. Screenshots (Extract all regardless of attribute order or tag type)
