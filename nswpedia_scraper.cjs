@@ -365,15 +365,24 @@ async function resolveDirectDownloadLink(downloadListUrl) {
         const res = await fetchUrl(downloadListUrl);
         const html = res.body;
 
+        const directMatch = html.match(/href=['"](https?:\/\/(?:vikingfile|1fichier|datanodes|multiup|rushupload|mediafire|mega|megaup|drive\.google)[^'"]+)['"]/i);
+
         const match = html.match(/<a[^>]+id=['"]download-link['"][^>]+href=['"]([^'"]+)['"]/i) ||
                       html.match(/id=['"]download-link['"][^>]*\s+href=['"]([^'"]+)['"]/i) ||
                       html.match(/href=['"]([^'"]+)['"][^>]*id=['"]download-link['"]/i);
 
-        if (match) {
-            return match[1].replace(/&amp;/g, '&');
+        if (directMatch && (!match || /nswpediax\.site/i.test(match[1]))) {
+            return directMatch[1].replace(/&amp;/g, '&');
         }
 
-        const directMatch = html.match(/href=['"](https?:\/\/(?:vikingfile|1fichier|datanodes|multiup|rushupload|mediafire|mega|drive\.google)[^'"]+)['"]/i);
+        if (match) {
+            const url = match[1].replace(/&amp;/g, '&');
+            if (/nswpediax\.site/i.test(url) && directMatch) {
+                return directMatch[1].replace(/&amp;/g, '&');
+            }
+            return url;
+        }
+
         if (directMatch) {
             return directMatch[1].replace(/&amp;/g, '&');
         }

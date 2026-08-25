@@ -448,33 +448,54 @@ async function run() {
             console.log(`    Screens:   ${gameData.screenshots.length} screenshot(s) found`);
             console.log(`    Mirrors:   ${gameData.downloads.length} mirror link(s) found\n`);
 
-            // 4. Select candidate download files
+function getMirrorScore(url) {
+    if (!url) return -999;
+    const u = url.toLowerCase();
+    if (u.includes('nswpediax.site') || u.includes('invalid') || u.includes('placeholder')) return -100;
+    if (u.includes('vikingfile.com')) return 100;
+    if (u.includes('datanodes.to')) return 90;
+    if (u.includes('1fichier.com')) return 85;
+    if (u.includes('mediafire.com')) return 80;
+    if (u.includes('megaup.net')) return 75;
+    if (u.includes('gofile.io')) return 70;
+    if (u.includes('rushupload.com')) return 65;
+    if (u.includes('multiup.')) return 60;
+    return 10;
+}
+
+            // 4. Select candidate download files & collect all available mirrors
             const availableDownloads = gameData.downloads.filter(d => d.directUrl && !d.directUrl.includes('placeholder'));
 
-            // Sort: prioritize Vikingfile
-            availableDownloads.sort((a, b) => {
-                if (a.directUrl.includes('vikingfile.com')) return -1;
-                if (b.directUrl.includes('vikingfile.com')) return 1;
-                return 0;
-            });
-
-            // Group by unique file (Base Game, Update, DLC)
-            const selectedFiles = [];
-            const seenTypes = new Set();
+            const groupedFiles = new Map();
 
             for (const mirror of availableDownloads) {
-                const uniqueKey = `${mirror.type}_${mirror.version || 'v0'}_${mirror.name.toLowerCase()}`;
-                if (!seenTypes.has(uniqueKey)) {
-                    seenTypes.add(uniqueKey);
-                    selectedFiles.push(mirror);
+                const dlcSuffix = mirror.type === 'DLC' ? cleanDlcDisplayName(mirror.name, gameData.title) : '';
+                const uniqueKey = `${mirror.type}_${mirror.version || 'v0'}_${dlcSuffix || mirror.name.toLowerCase()}`;
+                if (!groupedFiles.has(uniqueKey)) {
+                    groupedFiles.set(uniqueKey, {
+                        ...mirror,
+                        mirrors: [mirror]
+                    });
+                } else {
+                    groupedFiles.get(uniqueKey).mirrors.push(mirror);
                 }
             }
 
+            const selectedFiles = Array.from(groupedFiles.values()).map(item => {
+                // Sort mirrors: best host first, dead hosts last
+                item.mirrors.sort((a, b) => getMirrorScore(b.directUrl) - getMirrorScore(a.directUrl));
+                item.directUrl = item.mirrors[0].directUrl;
+                return item;
+            });
+
             if (selectedFiles.length === 0) {
-                throw new Error('No downloadable direct ROM links found on the NSWPedia page.');
+                throw new Error('No downloadable direct ROM links found on the game page.');
             }
 
             console.log(`📦 Selected ${selectedFiles.length} file(s) for download & AbreHamrahi upload.`);
+            for (const sf of selectedFiles) {
+                console.log(`    - ${sf.name} [${sf.type}]: ${sf.mirrors.length} mirror(s) available`);
+            }
 
             const uploadedFiles = [];
             const gameFolderName = `Nintendo_Switch/${cleanFolderName(gameData.title)}`;
@@ -483,8 +504,8 @@ async function run() {
                 const fileItem = selectedFiles[i];
                 console.log(`\n---------------------------------------------------------------`);
                 console.log(`[${i + 1}/${selectedFiles.length}] 📥 Processing: ${fileItem.name} (${fileItem.size || 'Size N/A'})`);
-                console.log(`    Type:   ${fileItem.type} | Format: ${fileItem.format || 'NSP'}`);
-                console.log(`    Source: ${fileItem.directUrl}`);
+                console.log(`    Type:    ${fileItem.type} | Format: ${fileItem.format || 'NSP'}`);
+                console.log(`    Mirrors: ${fileItem.mirrors.length} candidate mirror(s)`);
 
                 const baseRarName = generateRomFilename(gameData.title, fileItem, '.rar');
                 const cleanBaseName = baseRarName.replace(/\.(rar|zip|7z)$/i, '');
@@ -565,28 +586,53 @@ async function run() {
                             fileSuccess = true;
                             break;
                         } else {
-                            console.log(`    📥 File not found in cloud. Starting download from source: ${fileItem.directUrl}`);
-                            // Step A: Determine clean temp filename
+                            // Step A: Download file from candidate mirrors (with automatic fallback)
+                            let dlResult = null;
+                            let lastDlError = null;
+                            let downloadedFilePath = null;
+
                             const tempExt = fileItem.format ? `.${fileItem.format.toLowerCase()}` : '.nsp';
                             const tempDownloadName = `temp_${Date.now()}_${cleanFolderName(gameData.title)}_${i + 1}${tempExt}`;
                             const tempLocalFilePath = path.join(DEST_DIR, tempDownloadName);
 
-                            // Step B: Download file locally
-                            console.log(`    Saving temporary download to: ${tempLocalFilePath}`);
-                            const dlResult = await downloadRomFile(fileItem.directUrl, tempLocalFilePath);
-                            console.log(`\n    ✅ Downloaded successfully: ${formatBytes(dlResult.totalBytes)}`);
+                            for (let mIdx = 0; mIdx < fileItem.mirrors.length; mIdx++) {
+                                const currentMirror = fileItem.mirrors[mIdx];
+                                const sourceUrl = currentMirror.directUrl;
+                                console.log(`    📥 [Mirror ${mIdx + 1}/${fileItem.mirrors.length}] Trying source: ${sourceUrl} (${currentMirror.server || 'Direct'})`);
+                                console.log(`    Saving temporary download to: ${tempLocalFilePath}`);
 
-                            // Step C: Package & split into 2GB password-protected parts (.part1.rar, .part2.rar)
+                                try {
+                                    dlResult = await downloadRomFile(sourceUrl, tempLocalFilePath);
+                                    console.log(`\n    ✅ Downloaded successfully from Mirror ${mIdx + 1}: ${formatBytes(dlResult.totalBytes)}`);
+                                    downloadedFilePath = tempLocalFilePath;
+                                    break;
+                                } catch (dlErr) {
+                                    lastDlError = dlErr;
+                                    console.warn(`\n    ⚠️ Mirror ${mIdx + 1} failed: ${dlErr.message}`);
+                                    if (fs.existsSync(tempLocalFilePath)) {
+                                        try { fs.unlinkSync(tempLocalFilePath); } catch {}
+                                    }
+                                    if (mIdx < fileItem.mirrors.length - 1) {
+                                        console.log(`    🔄 Falling back to mirror ${mIdx + 2}/${fileItem.mirrors.length}...`);
+                                    }
+                                }
+                            }
+
+                            if (!dlResult || !downloadedFilePath) {
+                                throw lastDlError || new Error(`All ${fileItem.mirrors.length} mirror(s) failed for file: ${fileItem.name}`);
+                            }
+
+                            // Step B: Package & split into 2GB password-protected parts (.part1.rar, .part2.rar)
                             console.log(`    🔒 Packaging into RAR format with password '${ZIP_PASSWORD}'...`);
-                            const generatedParts = createProtectedParts(tempLocalFilePath, DEST_DIR, baseRarName, ZIP_PASSWORD, PART_SIZE_MB);
+                            const generatedParts = createProtectedParts(downloadedFilePath, DEST_DIR, baseRarName, ZIP_PASSWORD, PART_SIZE_MB);
                             console.log(`    📦 Generated ${generatedParts.length} part(s).`);
 
                             // Clean up temporary downloaded source file
-                            if (fs.existsSync(tempLocalFilePath)) {
-                                fs.unlinkSync(tempLocalFilePath);
+                            if (fs.existsSync(downloadedFilePath)) {
+                                fs.unlinkSync(downloadedFilePath);
                             }
 
-                            // Step D: Upload all parts to AbreHamrahi Cloud
+                            // Step C: Upload all parts to AbreHamrahi Cloud
                             for (let pIdx = 0; pIdx < generatedParts.length; pIdx++) {
                                 const part = generatedParts[pIdx];
                                 console.log(`    ☁️ Uploading Part ${part.partNumber}/${part.totalParts}: "${part.name}" (${formatBytes(part.size)})...`);
