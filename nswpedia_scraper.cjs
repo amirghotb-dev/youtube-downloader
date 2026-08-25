@@ -157,6 +157,51 @@ function cleanGameTitle(title) {
 }
 
 /**
+ * Clean DLC display name, stripping generic prefixes or game titles
+ */
+function cleanDlcDisplayName(rawName, gameTitle = '') {
+    if (!rawName) return '';
+    let name = rawName.trim()
+        .replace(/\.(nsp|xci|nsz|rar|zip|7z)$/i, '')
+        .replace(/^Download\s+/i, '')
+        .replace(/\.ns$/i, '')
+        .replace(/_+/g, ' ')
+        .trim();
+
+    // Check if name is generic
+    if (/^(dlc|pack|all dlc|dlc pack|expansion|bonus|extra)$/i.test(name)) {
+        return '';
+    }
+
+    // Normalize game title & name to alphanumeric tokens to remove repetitive title prefix
+    const getTokens = (str) => (str || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').split(/\s+/).filter(w => w.length > 1 && !/^(plus|and|the|of|a|an)$/.test(w));
+    const titleTokens = getTokens(gameTitle);
+    const nameTokens = getTokens(name);
+
+    let matchCount = 0;
+    for (let i = 0; i < Math.min(titleTokens.length, nameTokens.length); i++) {
+        if (titleTokens[i] === nameTokens[i]) {
+            matchCount++;
+        } else {
+            break;
+        }
+    }
+
+    if (matchCount >= 2 && matchCount >= Math.min(3, titleTokens.length)) {
+        const lastToken = nameTokens[matchCount - 1];
+        const lastPos = name.toLowerCase().indexOf(lastToken);
+        if (lastPos !== -1) {
+            name = name.substring(lastPos + lastToken.length);
+        }
+    }
+
+    name = name.replace(/^[\s\-_:–+]+/, '').trim();
+    name = name.replace(/^DLC\s*[-–:]*\s*/i, '').replace(/\s*[-–:]*\s*DLC$/i, '').trim();
+
+    return name;
+}
+
+/**
  * Generate proper file name for download/ROM item
  */
 function generateRomFilename(gameTitle, item, extOverride = null) {
@@ -166,35 +211,14 @@ function generateRomFilename(gameTitle, item, extOverride = null) {
 
     const ext = extOverride || (item.format ? `.${item.format.toLowerCase()}` : '.nsp');
 
-    if (!isGeneric && raw.length > 3 && raw.toLowerCase().includes(base.toLowerCase().replace(/_/g, ' ').substring(0, 6))) {
-        let safe = sanitizeFilename(raw);
-        if (!safe.toLowerCase().endsWith(ext.toLowerCase())) {
-            safe += ext;
-        }
-        return safe;
-    }
-
     let typeSuffix = '';
     if (item.type === 'Update') {
         const ver = item.version && item.version !== 'Update' ? `_${item.version}` : '_Update';
         typeSuffix = ver;
     } else if (item.type === 'DLC') {
-        if (!isGeneric && raw.length > 2) {
-            // Clean DLC name: Mario + Rabbids: Weapon Packs -> DLC_Weapon_Packs
-            let cleanDlcPart = raw
-                .replace(/^Download\s+/i, '')
-                .replace(/\.(nsp|xci|nsz|rar|zip|7z)$/i, '')
-                .replace(/[^a-zA-Z0-9_\- ]/g, ' ')
-                .trim()
-                .replace(/\s+/g, '_');
-            
-            // Remove game title prefix if present inside DLC name
-            const baseClean = base.replace(/_/g, '').toLowerCase();
-            const dlcClean = cleanDlcPart.replace(/_/g, '').toLowerCase();
-            if (dlcClean.startsWith(baseClean)) {
-                cleanDlcPart = cleanDlcPart.substring(base.length).replace(/^_+/, '');
-            }
-            
+        const dlcName = cleanDlcDisplayName(raw, gameTitle);
+        if (dlcName && dlcName.length > 1) {
+            const cleanDlcPart = dlcName.replace(/[^a-zA-Z0-9_\- ]/g, ' ').trim().replace(/\s+/g, '_');
             typeSuffix = `_DLC_${cleanDlcPart || 'Pack'}`.replace(/_+/g, '_');
         } else {
             typeSuffix = '_DLC';
@@ -227,15 +251,15 @@ function parseRomItemDetails(title, formatHint = '') {
         format = 'NSP';
     }
 
-    if (/update/i.test(raw) || /v?\d+(\.\d+)+/i.test(raw) || /\[v?\d+\]/i.test(raw)) {
+    if (/update/i.test(raw) || /\[v?\d+\]/i.test(raw)) {
         type = 'Update';
-        const vMatch = raw.match(/v?(\d+(\.\d+)+)/i) || raw.match(/\[v?(\d+)\]/i);
-        if (vMatch) {
+        const vMatch = raw.match(/v?(\d+(?:\.\d+)*)/i) || raw.match(/\[v?(\d+)\]/i);
+        if (vMatch && vMatch[1]) {
             version = vMatch[0].startsWith('v') || vMatch[0].startsWith('V') ? vMatch[0] : `v${vMatch[1]}`;
         } else {
             version = 'Update';
         }
-    } else if (/dlc/i.test(raw) || /pack/i.test(raw) || /expansion/i.test(raw) || /unlocker/i.test(raw) || /challenge/i.test(raw) || /story/i.test(raw) || /costume/i.test(raw) || /weapon/i.test(raw) || /bonus/i.test(raw) || /adventure/i.test(raw)) {
+    } else if (/dlc/i.test(raw) || /pack/i.test(raw) || /expansion/i.test(raw) || /unlocker/i.test(raw) || /challenge/i.test(raw) || /story/i.test(raw) || /costume/i.test(raw) || /weapon/i.test(raw) || /bonus/i.test(raw) || /adventure/i.test(raw) || /add\s+/i.test(raw) || /season\s*pass/i.test(raw)) {
         type = 'DLC';
         version = 'DLC';
     } else if (/base/i.test(raw) || /main/i.test(raw)) {
@@ -839,6 +863,7 @@ module.exports = {
     resolveDirectDownloadLink,
     parseRomItemDetails,
     cleanGameTitle,
+    cleanDlcDisplayName,
     generateRomFilename,
     formatBytes,
     sanitizeFilename

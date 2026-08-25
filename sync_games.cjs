@@ -24,6 +24,7 @@ const {
     scrapeGame,
     downloadFile,
     cleanGameTitle,
+    cleanDlcDisplayName,
     generateRomFilename,
     formatBytes,
     sanitizeFilename
@@ -533,9 +534,15 @@ async function run() {
                         if (fileItem.type === 'Base Game') {
                             baseDisplayTitle += ' - نسخه اصلی بازی';
                         } else if (fileItem.type === 'Update') {
-                            baseDisplayTitle += ` - آپدیت ${fileItem.version || ''}`.trim();
+                            const ver = fileItem.version && fileItem.version !== 'Update' ? ` ${fileItem.version}` : '';
+                            baseDisplayTitle += ` - آپدیت${ver}`.trim();
                         } else if (fileItem.type === 'DLC') {
-                            baseDisplayTitle += ' - بسته الحاقی (DLC)';
+                            const dlcName = cleanDlcDisplayName(fileItem.name, gameData.title);
+                            if (dlcName && dlcName.length > 1 && !/^(base game|update)$/i.test(dlcName)) {
+                                baseDisplayTitle += ` - بسته الحاقی (${dlcName})`;
+                            } else {
+                                baseDisplayTitle += ' - بسته الحاقی (DLC)';
+                            }
                         }
 
                         if (existingCloudFile) {
