@@ -271,87 +271,191 @@ function parseRomItemDetails(title, formatHint = '') {
 }
 
 /**
- * Search NSWPedia for games matching query
+ * Search NSWPedia or NSVault for games matching query
  */
-async function searchGames(query, limit = 10) {
-    const searchUrl = `https://nswpedia.com/?s=${encodeURIComponent(query)}`;
-    const response = await fetchUrl(searchUrl);
-    const html = response.body;
-
+async function searchGames(query, limit = 10, source = 'all') {
     const results = [];
-    const itemRegex = /<div class="archive-left subtitle">([\s\S]*?)<\/div>\s*<\/div>/gi;
-    let match;
+    const seenUrls = new Set();
 
-    while ((match = itemRegex.exec(html)) !== null && results.length < limit) {
-        const block = match[1];
+    // 1. Search NSWPedia
+    if (source === 'all' || source === 'nswpedia') {
+        try {
+            const searchUrl = `https://nswpedia.com/?s=${encodeURIComponent(query)}`;
+            const response = await fetchUrl(searchUrl);
+            const html = response.body;
 
-        const linkMatch = block.match(/href=['"](https:\/\/nswpedia\.com\/nintendo-switch-roms\/[^'"]+)['"][^>]*>([\s\S]*?)<\/a>/i);
-        if (!linkMatch) continue;
+            const itemRegex = /<div class="archive-left subtitle">([\s\S]*?)<\/div>\s*<\/div>/gi;
+            let match;
 
-        const url = linkMatch[1];
-        const rawTitle = stripHtml(linkMatch[2]);
+            while ((match = itemRegex.exec(html)) !== null && results.length < limit) {
+                const block = match[1];
+                const linkMatch = block.match(/href=['"](https:\/\/nswpedia\.com\/nintendo-switch-roms\/[^'"]+)['"][^>]*>([\s\S]*?)<\/a>/i);
+                if (!linkMatch) continue;
 
-        const imgMatch = block.match(/<img[^>]+src=['"]([^'"]+)['"]/i);
-        const cover = imgMatch ? imgMatch[1] : null;
+                const url = linkMatch[1];
+                if (seenUrls.has(url)) continue;
+                seenUrls.add(url);
 
-        const badges = [];
-        const badgeRegex = /<span class="badge[^"]*">([^<]+)<\/span>/gi;
-        let bMatch;
-        while ((bMatch = badgeRegex.exec(block)) !== null) {
-            badges.push(stripHtml(bMatch[1]));
+                const rawTitle = stripHtml(linkMatch[2]);
+                const imgMatch = block.match(/<img[^>]+src=['"]([^'"]+)['"]/i);
+                const cover = imgMatch ? imgMatch[1] : null;
+
+                const badges = [];
+                const badgeRegex = /<span class="badge[^"]*">([^<]+)<\/span>/gi;
+                let bMatch;
+                while ((bMatch = badgeRegex.exec(block)) !== null) {
+                    badges.push(stripHtml(bMatch[1]));
+                }
+
+                results.push({
+                    title: rawTitle,
+                    url,
+                    cover,
+                    badges,
+                    source: 'NSWPedia'
+                });
+            }
+        } catch (err) {
+            // Ignore search error
         }
+    }
 
-        results.push({
-            title: rawTitle,
-            url,
-            cover,
-            badges
-        });
+    // 2. Search NSVault
+    if ((source === 'all' || source === 'nsvault') && results.length < limit) {
+        try {
+            const nsvaultSearchUrl = `https://nsvault.me/?s=${encodeURIComponent(query)}`;
+            const response = await fetchUrl(nsvaultSearchUrl, { referer: 'https://nsvault.me/' });
+            const html = response.body;
+
+            // Pattern for NSVault search cards / article links
+            const cardRegex = /<a\b[^>]*\bhref=['"](https:\/\/nsvault\.me\/roms\/[^'"]+)['"][^>]*>([\s\S]*?)<\/a>/gi;
+            let match;
+
+            while ((match = cardRegex.exec(html)) !== null && results.length < limit) {
+                const url = match[1];
+                if (seenUrls.has(url)) continue;
+                seenUrls.add(url);
+
+                const block = match[2];
+                const imgMatch = block.match(/<img[^>]+src=['"]([^'"]+)['"]/i);
+                const titleMatch = block.match(/<h[234][^>]*>([\s\S]*?)<\/h[234]>/i) || block.match(/class=['"][^'"]*title[^'"]*['"][^>]*>([\s\S]*?)<\//i);
+                
+                let rawTitle = titleMatch ? stripHtml(titleMatch[1]) : '';
+                if (!rawTitle) {
+                    const fallbackSlug = url.split('/').filter(Boolean).pop() || '';
+                    rawTitle = fallbackSlug.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                }
+
+                const cover = imgMatch ? imgMatch[1] : null;
+
+                results.push({
+                    title: rawTitle,
+                    url,
+                    cover,
+                    badges: ['Switch'],
+                    source: 'NSVault'
+                });
+            }
+        } catch (err) {
+            // Ignore NSVault search error
+        }
     }
 
     return results;
 }
 
 /**
- * Fetch latest ROMs from category page
+ * Fetch latest ROMs from category page (NSWPedia or NSVault)
  */
-async function getLatestGames(page = 1, limit = 12) {
-    const catUrl = page > 1 
-        ? `https://nswpedia.com/category/nintendo-switch-roms/page/${page}/`
-        : `https://nswpedia.com/category/nintendo-switch-roms/`;
-
-    const response = await fetchUrl(catUrl);
-    const html = response.body;
-
+async function getLatestGames(page = 1, limit = 12, source = 'all') {
     const results = [];
-    const itemRegex = /<div class="archive-left subtitle">([\s\S]*?)<\/div>\s*<\/div>/gi;
-    let match;
+    const seenUrls = new Set();
 
-    while ((match = itemRegex.exec(html)) !== null && results.length < limit) {
-        const block = match[1];
+    if (source === 'all' || source === 'nswpedia') {
+        try {
+            const catUrl = page > 1 
+                ? `https://nswpedia.com/category/nintendo-switch-roms/page/${page}/`
+                : `https://nswpedia.com/category/nintendo-switch-roms/`;
 
-        const linkMatch = block.match(/href=['"](https:\/\/nswpedia\.com\/nintendo-switch-roms\/[^'"]+)['"][^>]*>([\s\S]*?)<\/a>/i);
-        if (!linkMatch) continue;
+            const response = await fetchUrl(catUrl);
+            const html = response.body;
 
-        const url = linkMatch[1];
-        const rawTitle = stripHtml(linkMatch[2]);
+            const itemRegex = /<div class="archive-left subtitle">([\s\S]*?)<\/div>\s*<\/div>/gi;
+            let match;
 
-        const imgMatch = block.match(/<img[^>]+src=['"]([^'"]+)['"]/i);
-        const cover = imgMatch ? imgMatch[1] : null;
+            while ((match = itemRegex.exec(html)) !== null && results.length < limit) {
+                const block = match[1];
+                const linkMatch = block.match(/href=['"](https:\/\/nswpedia\.com\/nintendo-switch-roms\/[^'"]+)['"][^>]*>([\s\S]*?)<\/a>/i);
+                if (!linkMatch) continue;
 
-        const badges = [];
-        const badgeRegex = /<span class="badge[^"]*">([^<]+)<\/span>/gi;
-        let bMatch;
-        while ((bMatch = badgeRegex.exec(block)) !== null) {
-            badges.push(stripHtml(bMatch[1]));
+                const url = linkMatch[1];
+                if (seenUrls.has(url)) continue;
+                seenUrls.add(url);
+
+                const rawTitle = stripHtml(linkMatch[2]);
+                const imgMatch = block.match(/<img[^>]+src=['"]([^'"]+)['"]/i);
+                const cover = imgMatch ? imgMatch[1] : null;
+
+                const badges = [];
+                const badgeRegex = /<span class="badge[^"]*">([^<]+)<\/span>/gi;
+                let bMatch;
+                while ((bMatch = badgeRegex.exec(block)) !== null) {
+                    badges.push(stripHtml(bMatch[1]));
+                }
+
+                results.push({
+                    title: rawTitle,
+                    url,
+                    cover,
+                    badges,
+                    source: 'NSWPedia'
+                });
+            }
+        } catch (err) {
+            // Ignore
         }
+    }
 
-        results.push({
-            title: rawTitle,
-            url,
-            cover,
-            badges
-        });
+    if ((source === 'all' || source === 'nsvault') && results.length < limit) {
+        try {
+            const nsvCatUrl = page > 1 
+                ? `https://nsvault.me/nintendo-switch-roms/page/${page}/`
+                : `https://nsvault.me/nintendo-switch-roms/`;
+
+            const response = await fetchUrl(nsvCatUrl, { referer: 'https://nsvault.me/' });
+            const html = response.body;
+
+            const cardRegex = /<a\b[^>]*\bhref=['"](https:\/\/nsvault\.me\/roms\/[^'"]+)['"][^>]*>([\s\S]*?)<\/a>/gi;
+            let match;
+
+            while ((match = cardRegex.exec(html)) !== null && results.length < limit) {
+                const url = match[1];
+                if (seenUrls.has(url)) continue;
+                seenUrls.add(url);
+
+                const block = match[2];
+                const imgMatch = block.match(/<img[^>]+src=['"]([^'"]+)['"]/i);
+                const titleMatch = block.match(/<h[234][^>]*>([\s\S]*?)<\/h[234]>/i) || block.match(/class=['"][^'"]*title[^'"]*['"][^>]*>([\s\S]*?)<\//i);
+                
+                let rawTitle = titleMatch ? stripHtml(titleMatch[1]) : '';
+                if (!rawTitle) {
+                    const fallbackSlug = url.split('/').filter(Boolean).pop() || '';
+                    rawTitle = fallbackSlug.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                }
+
+                const cover = imgMatch ? imgMatch[1] : null;
+
+                results.push({
+                    title: rawTitle,
+                    url,
+                    cover,
+                    badges: ['Switch'],
+                    source: 'NSVault'
+                });
+            }
+        } catch (err) {
+            // Ignore
+        }
     }
 
     return results;
@@ -403,9 +507,10 @@ function sanitizeDisplayTitle(rawTitle) {
     // Remove "Download " prefix
     title = title.replace(/^\s*Download\s+/i, '');
 
-    // Remove site brand if present
-    title = title.replace(/\s*[-–|]\s*NSWpedia(?:\.com)?\s*$/i, '');
-    title = title.replace(/^NSWpedia(?:\.com)?\s*[-–|:]*\s*/i, '');
+    // Remove site brand if present (NSWpedia or NSVault)
+    title = title.replace(/\s*[-–|]\s*(?:NSWpedia(?:\.com)?|NSVault(?:\.me)?)\s*$/i, '');
+    title = title.replace(/^(?:NSWpedia(?:\.com)?|NSVault(?:\.me)?)\s*[-–|:]*\s*/i, '');
+    title = title.replace(/\s*Switch\s*[-–|]\s*(?:NSWpedia|NSVault(?:\.me)?)\s*$/i, '');
 
     // Remove ROM terms, formats, versions, updates, DLC suffixes
     title = title.replace(/\s*\(?(?:NSP|XCI|NSZ)(?:\/(?:NSP|XCI|NSZ))?\)?\s*(?:\+\s*Update|\+\s*DLC|Full Game|Update|DLC|v\d+[\.\d]*|\bROM\b|Base Game).*/gi, '');
@@ -425,14 +530,14 @@ function sanitizeDisplayTitle(rawTitle) {
 function extractGameTitle(html, fallbackSlug = '') {
     if (!html) return '';
 
-    // 1. Check all <h1> tags in html, filtering out logo / NSWpedia headers
+    // 1. Check all <h1> tags in html, filtering out logo / site headers
     const h1Regex = /<h1[^>]*>([\s\S]*?)<\/h1>/gi;
     let match;
     while ((match = h1Regex.exec(html)) !== null) {
         const text = stripHtml(match[1]).trim();
-        if (text && !/nswpedia/i.test(text)) {
+        if (text && !/(?:nswpedia|nsvault)/i.test(text)) {
             const cleaned = sanitizeDisplayTitle(text);
-            if (cleaned && cleaned.length >= 2 && !/nswpedia/i.test(cleaned)) {
+            if (cleaned && cleaned.length >= 2 && !/(?:nswpedia|nsvault)/i.test(cleaned)) {
                 return cleaned;
             }
         }
@@ -443,7 +548,7 @@ function extractGameTitle(html, fallbackSlug = '') {
                          html.match(/<meta\s+content=['"]([^'"]+)['"]\s+property=['"]og:title['"]/i);
     if (ogTitleMatch) {
         const cleaned = sanitizeDisplayTitle(ogTitleMatch[1]);
-        if (cleaned && cleaned.length >= 2 && !/nswpedia/i.test(cleaned)) {
+        if (cleaned && cleaned.length >= 2 && !/(?:nswpedia|nsvault)/i.test(cleaned)) {
             return cleaned;
         }
     }
@@ -452,7 +557,7 @@ function extractGameTitle(html, fallbackSlug = '') {
     const titleTagMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
     if (titleTagMatch) {
         const cleaned = sanitizeDisplayTitle(titleTagMatch[1]);
-        if (cleaned && cleaned.length >= 2 && !/nswpedia/i.test(cleaned)) {
+        if (cleaned && cleaned.length >= 2 && !/(?:nswpedia|nsvault)/i.test(cleaned)) {
             return cleaned;
         }
     }
@@ -468,10 +573,13 @@ function extractGameTitle(html, fallbackSlug = '') {
 }
 
 /**
- * Scrape complete game page, including all metadata and direct download mirrors
+ * Scrape complete game page from NSWPedia or NSVault, including metadata and download mirrors
  */
 async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency: 5 }) {
-    const res = await fetchUrl(gameUrl);
+    const isNsVault = /nsvault\.me/i.test(gameUrl) || /dlsitex\.online/i.test(gameUrl);
+    const defaultReferer = isNsVault ? 'https://nsvault.me/' : 'https://nswpedia.com/';
+
+    const res = await fetchUrl(gameUrl, { referer: defaultReferer });
     const initialHtml = res.body;
 
     let mainHtml = initialHtml;
@@ -480,13 +588,14 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
     let downloadPageUrl = null;
 
     // Check if initial URL is a /download/ page or a main article page
-    const isDownloadUrl = gameUrl.includes('/download/');
+    const isDownloadUrl = gameUrl.includes('/download/') || gameUrl.includes('download.php') || /dlsitex\.online/i.test(gameUrl);
 
     if (isDownloadUrl) {
         downloadPageUrl = gameUrl;
         dlHtml = initialHtml;
 
-        const canonicalMatch = initialHtml.match(/<link\s+rel=['"]canonical['"]\s+href=['"](https:\/\/nswpedia\.com\/nintendo-switch-roms\/[^'"]+)['"]/i);
+        const canonicalMatch = initialHtml.match(/<link\s+rel=['"]canonical['"]\s+href=['"](https?:\/\/(?:nswpedia\.com|nsvault\.me)\/[^'"]+)['"]/i) ||
+                               initialHtml.match(/<a\b[^>]*\bclass=['"][^'"]*back-link[^'"]*['"][^>]*\bhref=['"]([^'"]+)['"]/i);
         if (canonicalMatch) {
             canonicalGameUrl = canonicalMatch[1];
             try {
@@ -500,7 +609,7 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
         }
     } else {
         // We are on the main game article page
-        const dlBtnMatch = mainHtml.match(/<a[^>]+href=['"](https:\/\/nswpedia\.com\/download\/[^'"]+)['"][^>]*>/i);
+        const dlBtnMatch = mainHtml.match(/<a[^>]+href=['"](https?:\/\/(?:nswpedia\.com\/download\/[^'"]+|dlsitex\.online\/download\.php\?[^'"]+|nsvault\.me\/download\/[^'"]+))['"][^>]*>/i);
         if (dlBtnMatch) {
             downloadPageUrl = dlBtnMatch[1];
             try {
@@ -521,7 +630,8 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
     // 2. Info Block Metadata (Title ID, Firmware, Release Date, Publisher)
     let titleId = null;
     const tidMatch = mainHtml.match(/Title ID<\/span>\s*<span[^>]*>([0-9A-Fa-f]{16})<\/span>/i) ||
-                     mainHtml.match(/Title ID[^<]*<\/span>[\s\S]*?<span[^>]*>([0-9A-Fa-f]{16})<\/span>/i);
+                     mainHtml.match(/Title ID[^<]*<\/span>[\s\S]*?<span[^>]*>([0-9A-Fa-f]{16})<\/span>/i) ||
+                     mainHtml.match(/Title ID\s*<\/span>\s*<span[^>]*font-mono[^>]*>([0-9A-Fa-f]{16})<\/span>/i);
     if (tidMatch) titleId = tidMatch[1].trim();
 
     let releaseDate = null;
@@ -546,7 +656,8 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
     // Check main post thumbnail image (handle any attribute order)
     const postImgMatch = mainHtml.match(/<img\b[^>]*\bclass=['"][^'"]*(?:wp-post-image|attachment-post-thumbnail|attachment-thumbnail)[^'"]*['"][^>]*\bsrc=['"]([^'"]+)['"]/i) ||
                          mainHtml.match(/<img\b[^>]*\bsrc=['"]([^'"]+)['"][^>]*\bclass=['"][^'"]*(?:wp-post-image|attachment-post-thumbnail|attachment-thumbnail)[^'"]*['"]/i) ||
-                         dlHtml.match(/<img\b[^>]*\bsrc=['"]([^'"]+)['"][^>]*\bclass=['"][^'"]*(?:wp-post-image|attachment-post-thumbnail|attachment-thumbnail)[^'"]*['"]/i);
+                         dlHtml.match(/<img\b[^>]*\bsrc=['"]([^'"]+)['"][^>]*\bclass=['"][^'"]*(?:wp-post-image|attachment-post-thumbnail|attachment-thumbnail)[^'"]*['"]/i) ||
+                         mainHtml.match(/<img\b[^>]*\bsrc=['"]([^'"]+(?:cover|boxart)[^'"]*)['"]/i);
 
     if (postImgMatch) {
         cover = postImgMatch[1] || postImgMatch[2];
@@ -563,12 +674,20 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
         }
     }
 
-    // Also look for og:image for banner
+    // Check hero-bg banner in NSVault
+    const bannerMatch = mainHtml.match(/class=['"]hero-bg['"][^>]*style=['"][^'"]*background-image:\s*url\(['"]?([^'"\)]+)['"]?\)/i) ||
+                        mainHtml.match(/background-image:\s*url\(['"]?([^'"\)]+banner[^'"\)]*)['"]?\)/i);
+    if (bannerMatch) {
+        banner = bannerMatch[1];
+    }
+
+    // Also look for og:image
     const ogMatch = mainHtml.match(/<meta\s+property=['"]og:image['"]\s+content=['"]([^'"]+)['"]/i) ||
                     mainHtml.match(/<meta\s+content=['"]([^'"]+)['"]\s+property=['"]og:image['"]/i) ||
                     dlHtml.match(/<meta\s+property=['"]og:image['"]\s+content=['"]([^'"]+)['"]/i);
     if (ogMatch) {
-        banner = ogMatch[1];
+        if (!banner) banner = ogMatch[1];
+        if (!cover) cover = ogMatch[1];
     }
 
     if (!cover) {
@@ -582,6 +701,16 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
 
     // 4. Screenshots (Extract all regardless of attribute order or tag type)
     const screenshots = [];
+
+    // NSVault data-lightbox-src
+    const lbSrcRegex = /data-lightbox-src=['"]([^'"]+)['"]/gi;
+    let lbMatch;
+    while ((lbMatch = lbSrcRegex.exec(mainHtml)) !== null) {
+        const ssUrl = lbMatch[1];
+        if (ssUrl && !screenshots.includes(ssUrl)) {
+            screenshots.push(ssUrl);
+        }
+    }
 
     // Any <a> with class containing screen_shot
     const ssLinkRegex = /<a\b[^>]*\bclass=['"][^'"]*screen_shot[^'"]*['"][^>]*\bhref=['"]([^'"]+)['"]|<a\b[^>]*\bhref=['"]([^'"]+)['"][^>]*\bclass=['"][^'"]*screen_shot[^'"]*['"]/gi;
@@ -604,90 +733,143 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
 
     // 5. Game description
     let description = '';
-    const descMatch = mainHtml.match(/<h3>Game description<\/h3>([\s\S]*?)(?:<div class="my-3"|<a [^>]*class="btn|<center>)/i);
+    const descMatch = mainHtml.match(/<h3>Game description<\/h3>([\s\S]*?)(?:<div class="my-3"|<a [^>]*class="btn|<center>)/i) ||
+                      mainHtml.match(/<h2[^>]*>(?:About The Game|Game Overview|Overview|Description)<\/h2>([\s\S]*?)(?:<h2|<section|<\/div>\s*<\/div>\s*<div class="bg-brand-card|$)/i);
     if (descMatch) {
         description = stripHtml(descMatch[1]);
     }
 
-    // 6. Parse all download tables
+    // 6. Parse download tables & version cards (NSWPedia format & NSVault / Dlsitex format)
     const mirrorTables = [];
-    const tableDivRegex = /<div[^>]*class=['"][^'"]*table-download[^'"]*['"][^>]*>([\s\S]*?)<\/div>/gi;
-    let tMatch;
-    let tableIndex = 0;
 
-    while ((tMatch = tableDivRegex.exec(dlHtml)) !== null) {
-        tableIndex++;
-        const block = tMatch[1];
+    // 6.1 Check NSVault / Dlsitex .version-card structure
+    const vCardRegex = /<div class="version-card">([\s\S]*?)(?=(?:<div class="version-card">|<div class="help-block"|<\/div>\s*<\/div>\s*<div class="help-block"|$))/gi;
+    let vMatch;
+    const dlBaseUrl = downloadPageUrl || gameUrl;
 
-        // Find server heading
-        const insideHMatch = block.match(/<h[234][^>]*>([\s\S]*?)<\/h[234]>/i);
-        let serverName = insideHMatch ? stripHtml(insideHMatch[1]) : '';
+    while ((vMatch = vCardRegex.exec(dlHtml)) !== null) {
+        const cardBlock = vMatch[1];
+        const hMatch = cardBlock.match(/<span class="version-name">([^<]+)<\/span>/i);
+        const cardTitle = hMatch ? stripHtml(hMatch[1]).trim() : 'Base Game';
 
-        if (!serverName) {
-            const preHtml = dlHtml.substring(0, tMatch.index);
-            const outsideHMatch = preHtml.match(/<h[234][^>]*>([\s\S]*?)<\/h[234]>(?:(?!<h[234])[\s\S])*$/i);
-            serverName = outsideHMatch ? stripHtml(outsideHMatch[1]) : `Mirror Group ${tableIndex}`;
-        }
-
-        serverName = serverName.replace(/^Downloads List\s*[-–:]*\s*/i, '').trim() || `Mirror Group ${tableIndex}`;
-
-        // Parse rows
-        const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+        const rowRegex = /<a[^>]+href=['"]([^'"]+)['"][^>]*class=['"]dl-row['"][\s\S]*?<span class="dl-name"[^>]*>([^<]+)<\/span>(?:[\s\S]*?<span class="dl-size">([^<]+)<\/span>)?/gi;
         let rMatch;
         const items = [];
 
-        while ((rMatch = rowRegex.exec(block)) !== null) {
-            const rowContent = rMatch[1];
-            if (/<th>/i.test(rowContent)) continue; // Header row
-
-            const linkMatch = rowContent.match(/href=['"](https:\/\/nswpedia\.com\/download\/[^'"]+)['"]/i);
-            if (!linkMatch) continue;
-
-            const intermediateUrl = linkMatch[1];
-
-            const cols = [];
-            const colRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
-            let cMatch;
-            while ((cMatch = colRegex.exec(rowContent)) !== null) {
-                cols.push(stripHtml(cMatch[1]));
+        while ((rMatch = rowRegex.exec(cardBlock)) !== null) {
+            let intermediateUrl = rMatch[1];
+            if (intermediateUrl.startsWith('?')) {
+                const parsedDl = new URL(dlBaseUrl);
+                intermediateUrl = `${parsedDl.origin}${parsedDl.pathname}${intermediateUrl}`;
             }
 
-            if (cols.length >= 2) {
-                const itemName = cols[0];
-                const col1 = cols[1] || '';
-                const col2 = cols[2] || '';
+            const serverName = stripHtml(rMatch[2]).trim();
+            const rawSize = rMatch[3] ? stripHtml(rMatch[3]).trim() : '';
+            const size = /\b(KB|MB|GB|TB|B)\b/i.test(rawSize) ? rawSize : cardTitle;
 
-                let size = col1;
-                let typeHint = col2;
+            const details = parseRomItemDetails(cardTitle, '');
 
-                // Smart detection: if col1 is a format extension and col2 is a byte size
-                if (/^(zip|nsp|xci|nsz|rar|7z)$/i.test(col1.trim()) || /\b(KB|MB|GB|TB|B)\b/i.test(col2)) {
-                    size = col2;
-                    typeHint = col1;
-                } else if (/\b(KB|MB|GB|TB|B)\b/i.test(col1)) {
-                    size = col1;
-                    typeHint = col2;
-                }
-
-                const details = parseRomItemDetails(itemName, typeHint);
-
-                items.push({
-                    name: itemName,
-                    size,
-                    format: details.format,
-                    type: details.type,
-                    version: details.version,
-                    intermediateUrl,
-                    directUrl: null
-                });
-            }
+            items.push({
+                name: cardTitle,
+                serverName,
+                size,
+                format: details.format,
+                type: details.type,
+                version: details.version,
+                intermediateUrl,
+                directUrl: null
+            });
         }
 
         if (items.length > 0) {
             mirrorTables.push({
-                serverName,
+                serverName: cardTitle,
                 items
             });
+        }
+    }
+
+    // 6.2 Check NSWPedia table-download structure (if not already found via version-card)
+    if (mirrorTables.length === 0) {
+        const tableDivRegex = /<div[^>]*class=['"][^'"]*table-download[^'"]*['"][^>]*>([\s\S]*?)<\/div>/gi;
+        let tMatch;
+        let tableIndex = 0;
+
+        while ((tMatch = tableDivRegex.exec(dlHtml)) !== null) {
+            tableIndex++;
+            const block = tMatch[1];
+
+            // Find server heading
+            const insideHMatch = block.match(/<h[234][^>]*>([\s\S]*?)<\/h[234]>/i);
+            let serverName = insideHMatch ? stripHtml(insideHMatch[1]) : '';
+
+            if (!serverName) {
+                const preHtml = dlHtml.substring(0, tMatch.index);
+                const outsideHMatch = preHtml.match(/<h[234][^>]*>([\s\S]*?)<\/h[234]>(?:(?!<h[234])[\s\S])*$/i);
+                serverName = outsideHMatch ? stripHtml(outsideHMatch[1]) : `Mirror Group ${tableIndex}`;
+            }
+
+            serverName = serverName.replace(/^Downloads List\s*[-–:]*\s*/i, '').trim() || `Mirror Group ${tableIndex}`;
+
+            // Parse rows
+            const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+            let rMatch;
+            const items = [];
+
+            while ((rMatch = rowRegex.exec(block)) !== null) {
+                const rowContent = rMatch[1];
+                if (/<th>/i.test(rowContent)) continue; // Header row
+
+                const linkMatch = rowContent.match(/href=['"](https?:\/\/(?:nswpedia\.com|nsvault\.me|dlsitex\.online)\/download\/[^'"]+)['"]/i) ||
+                                  rowContent.match(/href=['"](https?:\/\/[^'"]*\/download(?:\.php)?[^'"]+)['"]/i);
+                if (!linkMatch) continue;
+
+                const intermediateUrl = linkMatch[1];
+
+                const cols = [];
+                const colRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+                let cMatch;
+                while ((cMatch = colRegex.exec(rowContent)) !== null) {
+                    cols.push(stripHtml(cMatch[1]));
+                }
+
+                if (cols.length >= 2) {
+                    const itemName = cols[0];
+                    const col1 = cols[1] || '';
+                    const col2 = cols[2] || '';
+
+                    let size = col1;
+                    let typeHint = col2;
+
+                    // Smart detection: if col1 is a format extension and col2 is a byte size
+                    if (/^(zip|nsp|xci|nsz|rar|7z)$/i.test(col1.trim()) || /\b(KB|MB|GB|TB|B)\b/i.test(col2)) {
+                        size = col2;
+                        typeHint = col1;
+                    } else if (/\b(KB|MB|GB|TB|B)\b/i.test(col1)) {
+                        size = col1;
+                        typeHint = col2;
+                    }
+
+                    const details = parseRomItemDetails(itemName, typeHint);
+
+                    items.push({
+                        name: itemName,
+                        size,
+                        format: details.format,
+                        type: details.type,
+                        version: details.version,
+                        intermediateUrl,
+                        directUrl: null
+                    });
+                }
+            }
+
+            if (items.length > 0) {
+                mirrorTables.push({
+                    serverName,
+                    items
+                });
+            }
         }
     }
 
@@ -705,7 +887,7 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
             const batch = allItems.slice(i, i + batchSize);
             await Promise.all(batch.map(async (item) => {
                 if (item.intermediateUrl) {
-                    item.directUrl = await resolveDirectDownloadLink(item.intermediateUrl);
+                    item.directUrl = await resolveDirectDownloadLink(item.intermediateUrl, { referer: downloadPageUrl || gameUrl });
                 }
             }));
         }
@@ -715,7 +897,7 @@ async function scrapeGame(gameUrl, options = { resolveMirrors: true, concurrency
     for (const table of mirrorTables) {
         for (const item of table.items) {
             flatDownloads.push({
-                server: table.serverName,
+                server: item.serverName || table.serverName,
                 name: item.name,
                 type: item.type,
                 version: item.version,
