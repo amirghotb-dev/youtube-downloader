@@ -76,34 +76,74 @@ def download_video(url, output_dir, cookie_path=None):
         print(f"❌ خطا در دانلود ویدیو: {e}")
         return None
 
-def upload_video_to_site(item_type, item_id, file_path):
+import subprocess
+import json
+
+def upload_video_to_hamrahi(file_path, folder_path="Nintendo_Videos"):
+    """
+    Uploads downloaded video file to AbreHamrahi Cloud via hamrahi_uploader.cjs
+    Returns the public URL of the uploaded video.
+    """
+    refresh_token = os.environ.get("ABREHAMRAHI_REFRESH_TOKEN", "")
+    if not refresh_token:
+        print("⚠️ هشدار: متغیر ABREHAMRAHI_REFRESH_TOKEN تنظیم نشده است.")
+        return None
+
+    uploader_path = os.path.join(os.path.dirname(__file__), "hamrahi_uploader.cjs")
+    if not os.path.exists(uploader_path):
+        uploader_path = os.path.join(os.getcwd(), "hamrahi_uploader.cjs")
+
+    cmd = [
+        "node",
+        uploader_path,
+        "--file", file_path,
+        "--folder", folder_path,
+        "--concurrency", "4"
+    ]
+
+    print(f"☁️ در حال آپلود ویدیو به ابر همراهی (پوشه: {folder_path})...")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        stdout = proc.stdout
+        
+        # Extract public link from output
+        match = re.search(r"🌐 Public Link:\s*([^\r\n]+)", stdout)
+        if match:
+            public_url = match.group(1).strip()
+            print(f"✅ با موفقیت در ابر همراهی آپلود شد: {public_url}")
+            return public_url
+        else:
+            print(f"❌ خروجی uploader فاقد لینک عمومی بود:\n{stdout}\n{proc.stderr}")
+            return None
+    except Exception as e:
+        print(f"❌ خطا در اجرای hamrahi_uploader.cjs: {e}")
+        return None
+
+def send_video_url_to_site(item_type, item_id, public_video_url):
     url = f"{SITE_URL}/api/v1/sync/upload-video"
     headers = {
         "X-SYNC-TOKEN": SYNC_API_TOKEN,
-        "Accept": "application/json"
+        "Accept": "application/json",
+        "Content-Type": "application/json"
     }
     
-    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    print(f"🚀 در حال آپلود ویدیو ({file_size_mb:.2f} MB) به سایت...")
-
+    payload = {
+        "type": item_type,
+        "id": item_id,
+        "direct_url": public_video_url
+    }
+    
+    print(f"📡 در حال ثبت لینک ابر همراهی در وب‌سایت...")
     try:
-        with open(file_path, "rb") as f:
-            files = {
-                "video": (os.path.basename(file_path), f, "video/mp4")
-            }
-            data = {
-                "type": item_type,
-                "id": item_id
-            }
-            res = requests.post(url, headers=headers, data=data, files=files, timeout=300)
-            if res.status_code == 200:
-                print(f"✅ با موفقیت آپلود و در دیتابیس ثبت شد: {res.json().get('local_video_path')}")
-                return True
-            else:
-                print(f"❌ خطای آپلود ({res.status_code}): {res.text}")
-                return False
+        res = requests.post(url, headers=headers, json=payload, timeout=30)
+        if res.status_code == 200:
+            print(f"✅ لینک با موفقیت در سایت ثبت شد: {res.json().get('local_video_path')}")
+            return True
+        else:
+            print(f"❌ خطای ثبت در سرور ({res.status_code}): {res.text}")
+            return False
     except Exception as e:
-        print(f"❌ خطا در آپلود به سرور: {e}")
+        print(f"❌ خطا در اتصال به سرور سایت: {e}")
         return False
 
 def main():
@@ -155,9 +195,14 @@ def main():
                 # ۱. دانلود ویدیو با استفاده از کوکی
                 downloaded_file = download_video(yt_url, temp_dir, cookie_path)
                 
-                # ۲. آپلود به سایت
+                # ۲. آپلود به ابر همراهی و ثبت لینک در سایت
                 if downloaded_file and os.path.exists(downloaded_file):
-                    success = upload_video_to_site(item_type, item_id, downloaded_file)
+                    public_video_url = upload_video_to_hamrahi(downloaded_file, folder_path="Nintendo_Videos")
+                    if public_video_url:
+                        success = send_video_url_to_site(item_type, item_id, public_video_url)
+                    else:
+                        print("⚠️ آپلود ویدیو به ابر همراهی ناموفق بود.")
+                    
                     # پاک کردن فایل موقت پس از آپلود
                     if os.path.exists(downloaded_file):
                         os.remove(downloaded_file)
