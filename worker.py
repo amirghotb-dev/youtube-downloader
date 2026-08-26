@@ -6,10 +6,14 @@ import yt_dlp
 import tempfile
 import time
 
+import subprocess
+import json
+
 # متغیرهای محیطی دریافتی از گیت‌هاب یا فایل .env
 SITE_URL = os.environ.get("SITE_URL", "https://your-domain.com").rstrip("/")
 SYNC_API_TOKEN = os.environ.get("SYNC_API_TOKEN", "ninten2-sync-secret-key-2026")
 YOUTUBE_COOKIES_DATA = os.environ.get("YOUTUBE_COOKIES", "")
+ABREHAMRAHI_REFRESH_TOKEN = os.environ.get("ABREHAMRAHI_REFRESH_TOKEN", "")
 
 def get_pending_videos():
     url = f"{SITE_URL}/api/v1/sync/pending-videos"
@@ -76,40 +80,85 @@ def download_video(url, output_dir, cookie_path=None):
         print(f"❌ خطا در دانلود ویدیو: {e}")
         return None
 
-def upload_video_to_site(item_type, item_id, file_path):
-    url = f"{SITE_URL}/api/v1/sync/upload-video"
-    headers = {
-        "X-SYNC-TOKEN": SYNC_API_TOKEN,
-        "Accept": "application/json"
-    }
-    
+def upload_to_hamrahi(file_path, folder_name="Videos"):
+    """Upload downloaded video to AbreHamrahi Cloud using hamrahi_uploader.cjs"""
+    if not ABREHAMRAHI_REFRESH_TOKEN:
+        print("❌ خطا: متغیر محیطی ABREHAMRAHI_REFRESH_TOKEN تنظیم نشده است.")
+        return None
+
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    uploader_script = os.path.join(current_dir, "hamrahi_uploader.cjs")
+
+    if not os.path.exists(uploader_script):
+        print(f"❌ خطا: اسکریپت آپلودر ابر همراهی یافت نشد: {uploader_script}")
+        return None
+
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    print(f"🚀 در حال آپلود ویدیو ({file_size_mb:.2f} MB) به سایت...")
+    print(f"☁️ در حال آپلود ویدیو ({file_size_mb:.2f} MB) در پوشه {folder_name} ابر همراهی...")
 
     try:
-        with open(file_path, "rb") as f:
-            files = {
-                "video": (os.path.basename(file_path), f, "video/mp4")
-            }
-            data = {
-                "type": item_type,
-                "id": item_id
-            }
-            res = requests.post(url, headers=headers, data=data, files=files, timeout=300)
-            if res.status_code == 200:
-                print(f"✅ با موفقیت آپلود و در دیتابیس ثبت شد: {res.json().get('local_video_path')}")
-                return True
-            else:
-                print(f"❌ خطای آپلود ({res.status_code}): {res.text}")
-                return False
+        cmd = [
+            "node",
+            uploader_script,
+            "--refresh-token", ABREHAMRAHI_REFRESH_TOKEN,
+            "--file", file_path,
+            "--folder", folder_name,
+            "--concurrency", "4"
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        output = proc.stdout
+
+        # Find public link from uploader output
+        match = re.search(r"Public Link:\s*(https?://[^\s\n]+)", output)
+        if match:
+            public_url = match.group(1).strip()
+            print(f"🔗 لینک مستقیم ابر همراهی دریافت شد: {public_url}")
+            return public_url
+        else:
+            print(f"⚠️ آپلود انجام شد اما لینک پابلیک استخراج نشد. خروجی:\n{output}")
+            return None
+    except subprocess.CalledProcessError as e:
+        print(f"❌ خطای آپلود در ابر همراهی (exit {e.returncode}):\n{e.stderr or e.stdout}")
+        return None
     except Exception as e:
-        print(f"❌ خطا در آپلود به سرور: {e}")
+        print(f"❌ خطای غیرمنتظره در ارتباط با آپلودر همراهی: {e}")
+        return None
+
+def save_video_link_to_site(item_type, item_id, public_url):
+    """Send public URL to website API to update database"""
+    url = f"{SITE_URL}/api/v1/sync/save-video-url"
+    headers = {
+        "X-SYNC-TOKEN": SYNC_API_TOKEN,
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    data = {
+        "type": item_type,
+        "id": item_id,
+        "public_url": public_url
+    }
+
+    print(f"📡 ارسال لینک ویدیو به سایت: {url}")
+    try:
+        res = requests.post(url, headers=headers, json=data, timeout=30)
+        if res.status_code == 200:
+            print(f"✅ لینک ویدیو با موفقیت در دیتابیس سایت ثبت شد: {public_url}")
+            return True
+        else:
+            print(f"❌ خطای ثبت در سایت ({res.status_code}): {res.text}")
+            return False
+    except Exception as e:
+        print(f"❌ خطا در اتصال به سرور سایت: {e}")
         return False
 
 def main():
     print("========================================")
-    print("🎮 Ninten2 YouTube Video Sync Worker")
+    print("🎮 Ninten2 YouTube to AbreHamrahi Sync Worker")
     print("========================================")
+
+    # بررسی توکن ابر همراهی
+    if not ABREHAMRAHI_REFRESH_TOKEN:
+        print("⚠️ هشدار: متغیر ABREHAMRAHI_REFRESH_TOKEN تنظیم نشده است. لطفاً آن را در گیت‌هاب Secrets قرار دهید.")
 
     # تعیین مسیر کوکی
     cookie_path = None
@@ -155,9 +204,14 @@ def main():
                 # ۱. دانلود ویدیو با استفاده از کوکی
                 downloaded_file = download_video(yt_url, temp_dir, cookie_path)
                 
-                # ۲. آپلود به سایت
+                # ۲. آپلود در ابر همراهی و ثبت لینک در سایت
                 if downloaded_file and os.path.exists(downloaded_file):
-                    success = upload_video_to_site(item_type, item_id, downloaded_file)
+                    public_url = upload_to_hamrahi(downloaded_file, folder_name="Videos")
+                    if public_url:
+                        save_video_link_to_site(item_type, item_id, public_url)
+                    else:
+                        print("⚠️ آپلود در ابر همراهی ناموفق بود.")
+
                     # پاک کردن فایل موقت پس از آپلود
                     if os.path.exists(downloaded_file):
                         os.remove(downloaded_file)
