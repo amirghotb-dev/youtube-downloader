@@ -346,14 +346,32 @@ async function findExistingFileInHamrahi(accessToken, folderId, fileNames, refre
                 });
             }
 
-            const publicLink = linkRes.body && linkRes.body.link ? linkRes.body.link : (found.download_url || '');
+            function extractLink(body, fallbackObj) {
+                if (body && typeof body === 'object') {
+                    if (typeof body.link === 'string') return body.link;
+                    if (typeof body.public_link === 'string') return body.public_link;
+                    if (typeof body.download_url === 'string') return body.download_url;
+                    if (typeof body.url === 'string') return body.url;
+                } else if (typeof body === 'string' && body.startsWith('http')) {
+                    return body;
+                }
+
+                if (fallbackObj && typeof fallbackObj === 'object') {
+                    if (typeof fallbackObj.download_url === 'string') return fallbackObj.download_url;
+                    if (typeof fallbackObj.public_url === 'string') return fallbackObj.public_url;
+                    if (typeof fallbackObj.link === 'string') return fallbackObj.link;
+                }
+                return '';
+            }
+
+            const publicLink = extractLink(linkRes.body, found);
 
             return {
                 id: found.id,
                 name: found.name,
                 size: found.size || 0,
                 public_url: publicLink,
-                download_url: found.download_url || publicLink,
+                download_url: typeof found.download_url === 'string' ? found.download_url : publicLink,
                 folder_id: folderId,
                 reused: true
             };
@@ -572,14 +590,32 @@ async function uploadFileToHamrahi(accessToken, filePath, parentFolderId = null,
         });
     }
 
-    const publicLink = linkRes.body && linkRes.body.link ? linkRes.body.link : uploadedFile.download_url;
+    function extractLinkString(body, fallbackObj) {
+        if (body && typeof body === 'object') {
+            if (typeof body.link === 'string') return body.link;
+            if (typeof body.public_link === 'string') return body.public_link;
+            if (typeof body.download_url === 'string') return body.download_url;
+            if (typeof body.url === 'string') return body.url;
+        } else if (typeof body === 'string' && body.startsWith('http')) {
+            return body;
+        }
+
+        if (fallbackObj && typeof fallbackObj === 'object') {
+            if (typeof fallbackObj.download_url === 'string') return fallbackObj.download_url;
+            if (typeof fallbackObj.public_url === 'string') return fallbackObj.public_url;
+            if (typeof fallbackObj.link === 'string') return fallbackObj.link;
+        }
+        return '';
+    }
+
+    const publicLink = extractLinkString(linkRes.body, uploadedFile);
 
     return {
         id: uploadedFile.id,
         name: uploadedFile.name,
         size: uploadedFile.size,
         public_url: publicLink,
-        download_url: uploadedFile.download_url,
+        download_url: typeof uploadedFile.download_url === 'string' ? uploadedFile.download_url : publicLink,
         folder_id: parentFolderId,
         created_at: new Date().toISOString()
     };
