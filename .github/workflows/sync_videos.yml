@@ -22,11 +22,6 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Set up Node.js (For AbreHamrahi Cloud Uploader)
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
       - name: Install Deno (JavaScript Runtime for YouTube Solver)
         uses: denoland/setup-deno@v2
         with:
@@ -46,7 +41,6 @@ jobs:
         env:
           SITE_URL: ${{ secrets.SITE_URL }}
           SYNC_API_TOKEN: ${{ secrets.SYNC_API_TOKEN }}
-          ABREHAMRAHI_REFRESH_TOKEN: ${{ secrets.ABREHAMRAHI_REFRESH_TOKEN }}
           YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
         run: |
           python worker.py
