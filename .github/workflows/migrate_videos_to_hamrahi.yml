@@ -30,7 +30,9 @@ jobs:
           SYNC_API_TOKEN: ${{ secrets.SYNC_API_TOKEN }}
           ABREHAMRAHI_REFRESH_TOKEN: ${{ secrets.ABREHAMRAHI_REFRESH_TOKEN }}
         run: |
-          cd scripts/youtube-downloader
+          if [ -d "scripts/youtube-downloader" ]; then
+            cd scripts/youtube-downloader
+          fi
           node migrate_videos.cjs --folder "${{ github.event.inputs.target_folder || 'Videos' }}"
 
       - name: Display Summary
