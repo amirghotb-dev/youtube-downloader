@@ -58,31 +58,28 @@ jobs:
           sudo apt-get install -y aria2 rar unrar p7zip-full zip unzip
 
       - name: ⚡ Download Game File via High-Speed Pipeline
-        id: download_step
         run: |
-          mkdir -p ./downloads
-          cd ./downloads
-
-          echo "🚀 Downloading from: ${{ github.event.inputs.rom_url }}"
+          mkdir -p "$GITHUB_WORKSPACE/downloads"
+          cd "$GITHUB_WORKSPACE/downloads"
           
-          # Use aria2c with 8 connections and retry support to prevent 429 rate limits
-          aria2c -x 8 -s 8 -j 1 -k 1M --max-connection-per-server=8 --retry-wait=3 --file-allocation=none "${{ github.event.inputs.rom_url }}"
+          aria2c -x 16 -s 16 -j 4 \
+            --check-certificate=false \
+            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+            "${{ github.event.inputs.rom_url }}"
 
-          # Find downloaded file name
           DOWNLOADED_FILE=$(ls -1 | head -n 1)
           FILE_PATH="$GITHUB_WORKSPACE/downloads/$DOWNLOADED_FILE"
           FILE_SIZE=$(stat -c%s "$FILE_PATH")
 
           echo "Downloaded file: $DOWNLOADED_FILE ($FILE_SIZE bytes)"
           
-          # Validation: Check if downloaded file is an HTML error page or suspiciously small (< 5MB)
           if [ "$FILE_SIZE" -lt 5242880 ]; then
             if grep -qiE "<html|<!doctype html|403 forbidden|access denied" "$FILE_PATH"; then
-              echo "❌ ERROR: The provided URL returned an HTML error page (HTTP 403 Forbidden / Expired Link / Captcha Wall) instead of a direct ROM file!"
+              echo "❌ ERROR: The provided URL returned an HTML error page!"
               head -n 25 "$FILE_PATH"
               exit 1
             fi
-            echo "❌ ERROR: Downloaded file size is only $FILE_SIZE bytes. Expected valid Nintendo Switch ROM (> 50MB)."
+            echo "❌ ERROR: Downloaded file size is only $FILE_SIZE bytes. Expected valid Switch ROM (> 5MB)."
             exit 1
           fi
 
@@ -94,8 +91,10 @@ jobs:
       - name: 🔒 Package & Split into 2GB RAR Parts (.part1.rar, .part2.rar)
         id: package_step
         run: |
-          cd ./downloads
-          RAW_FILE="$DOWNLOADED_FILE"
+          RAW_FILE="$FILE_PATH"
+          PACKAGED_DIR="$GITHUB_WORKSPACE/downloads/packaged"
+          mkdir -p "$PACKAGED_DIR"
+          
           CUSTOM_NAME="${{ github.event.inputs.custom_file_name }}"
           CLEAN_TITLE=$(echo "${{ github.event.inputs.game_title }}" | tr ' ' '_' | tr -cd '[:alnum:]_-')
           
@@ -105,25 +104,30 @@ jobs:
             BASE_NAME="${CLEAN_TITLE}"
           fi
 
-          mkdir -p ./packaged
-          
-          # 2GB in bytes = 2097152000 (2000 MB)
           SPLIT_THRESHOLD=2097152000
           
           if [ "$FILE_SIZE" -gt "$SPLIT_THRESHOLD" ] && [ "${{ github.event.inputs.split_2gb }}" == "true" ]; then
-            echo "📦 File size ($FILE_SIZE bytes) exceeds 2GB -> Splitting into 2000MB password-protected RAR parts (.part1.rar, .part2.rar)..."
-            rar a -v2000m -m0 -p"ninten2.ir" -ep1 -idq "./packaged/${BASE_NAME}.rar" "$RAW_FILE"
+            echo "📦 File size ($FILE_SIZE bytes) exceeds 2GB -> Splitting into 2000MB password-protected RAR parts..."
+            rar a -v2000m -m0 -p"ninten2.ir" -ep1 -idq "$PACKAGED_DIR/${BASE_NAME}.rar" "$RAW_FILE"
             rm -f "$RAW_FILE"
           else
             echo "📦 Packaging into single password-protected RAR file..."
-            rar a -m0 -p"ninten2.ir" -ep1 -idq "./packaged/${BASE_NAME}.rar" "$RAW_FILE"
+            rar a -m0 -p"ninten2.ir" -ep1 -idq "$PACKAGED_DIR/${BASE_NAME}.rar" "$RAW_FILE"
             rm -f "$RAW_FILE"
           fi
 
           echo "Listing packaged RAR parts:"
-          ls -lh ./packaged
+          ls -lh "$PACKAGED_DIR"
 
-      - name: ☁️ Upload All Parts to AbreHamrahi Cloud (Parallel 4x)
+      - name: 🧪 Verify Integrity of Created RAR Parts Before Upload
+        run: |
+          PACKAGED_DIR="$GITHUB_WORKSPACE/downloads/packaged"
+          cd "$PACKAGED_DIR"
+          FIRST_PART=$(ls -1 *.rar | head -n 1)
+          echo "🔍 Testing integrity of local packaged file $FIRST_PART..."
+          unrar t -p"ninten2.ir" "$FIRST_PART"
+
+      - name: ☁️ Upload All Parts to AbreHamrahi Cloud
         id: upload_step
         env:
           ABREHAMRAHI_REFRESH_TOKEN: ${{ secrets.ABREHAMRAHI_REFRESH_TOKEN }}
@@ -137,8 +141,9 @@ jobs:
           SUMMARY_FILE="$GITHUB_WORKSPACE/upload_summary.txt"
           touch $SUMMARY_FILE
 
-          # Loop through each packaged file and upload
-          for part_file in ./downloads/packaged/*; do
+          PACKAGED_DIR="$GITHUB_WORKSPACE/downloads/packaged"
+
+          for part_file in "$PACKAGED_DIR"/*; do
             if [ -f "$part_file" ]; then
               PART_NAME=$(basename "$part_file")
               echo "--------------------------------------------------------"
