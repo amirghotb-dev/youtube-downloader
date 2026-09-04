@@ -64,13 +64,15 @@ jobs:
             const $ = cheerio.load(html);
             const downloadLinks = [];
 
+            // Extract links from download buttons/links
             $('a[href]').each((i, el) => {
               const href = $(el).attr('href');
               if (href && (
                 href.includes('/downloads/file/') ||
                 href.match(/\.(zip|rar|7z|part\d+\.rar|001|nsp|xci|nsz)(\?.*)?$/i) ||
                 href.includes('dl.ninten2') ||
-                href.includes('dl.')
+                href.includes('dl.') ||
+                href.includes('abrehamrahi.ir')
               )) {
                 let absoluteUrl = href;
                 if (href.startsWith('/')) {
@@ -83,7 +85,7 @@ jobs:
               }
             });
 
-            console.log('🔗 Found ' + downloadLinks.length + ' download link(s):');
+            console.log('🔗 Found ' + downloadLinks.length + ' raw download link(s):');
             downloadLinks.forEach(l => console.log(' - ' + l));
 
             if (downloadLinks.length === 0) {
@@ -91,8 +93,31 @@ jobs:
               process.exit(1);
             }
 
+            // Follow HTTP redirects to resolve direct final storage URLs (e.g. resolve /downloads/file/573 to final URL)
+            const finalUrls = [];
+            for (const link of downloadLinks) {
+              try {
+                console.log(`🔄 Resolving redirect for: ${link}`);
+                const headRes = await axios.get(link, {
+                  maxRedirects: 5,
+                  headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                  }
+                });
+                const resolvedUrl = headRes.request.res.responseUrl || link;
+                console.log(`  └─ Final Target: ${resolvedUrl}`);
+                finalUrls.push(resolvedUrl);
+              } catch (e) {
+                if (e.response && e.response.request && e.response.request.res && e.response.request.res.responseUrl) {
+                  finalUrls.push(e.response.request.res.responseUrl);
+                } else {
+                  finalUrls.push(link);
+                }
+              }
+            }
+
             fs.mkdirSync('./downloads', { recursive: true });
-            fs.writeFileSync('./download_urls.txt', downloadLinks.join('\n'));
+            fs.writeFileSync('./download_urls.txt', finalUrls.join('\n'));
           }
 
           main();
@@ -110,8 +135,8 @@ jobs:
           cd downloads
           aria2c -i ../download_urls.txt \
             -j 4 -s 8 -x 8 \
+            --header="User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
             --check-certificate=false \
-            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
             --auto-file-renaming=false \
             --allow-overwrite=true || true
           
