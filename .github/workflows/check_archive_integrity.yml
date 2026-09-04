@@ -92,11 +92,9 @@ jobs:
               process.exit(1);
             }
 
-            // Fast parallel resolution of redirect URLs using HEAD requests with 5s timeout
             console.log('⚡ Resolving direct download URLs in parallel...');
             const resolveUrl = async (link) => {
               try {
-                // Use HEAD request instead of GET so we don't download body content!
                 const headRes = await axios.head(link, {
                   maxRedirects: 5,
                   timeout: 6000,
@@ -119,7 +117,7 @@ jobs:
 
             fs.mkdirSync('./downloads', { recursive: true });
             fs.writeFileSync('./download_urls.txt', finalUrls.join('\n'));
-            console.log('✅ All URLs resolved successfully in seconds.');
+            console.log('✅ All URLs resolved successfully.');
           }
 
           main();
@@ -145,7 +143,7 @@ jobs:
           echo "📂 Downloaded files list & sizes:"
           ls -lh
 
-      - name: 🧪 Test Archive Integrity & Extraction (Detailed Log Diagnosis)
+      - name: 🧪 Test Archive Integrity & Extraction
         id: test_archive
         run: |
           cd downloads
@@ -159,10 +157,10 @@ jobs:
 
           HAS_ERROR=0
 
-          test_single_file() {
+          test_archive_set() {
             FILE="$1"
             echo "--------------------------------------------------------"
-            echo "🔍 Testing integrity for file: $FILE"
+            echo "🔍 Testing integrity for archive set starting with: $FILE"
 
             TEST_OUTPUT=""
             STATUS=0
@@ -176,17 +174,18 @@ jobs:
             echo "$TEST_OUTPUT"
 
             if [ $STATUS -eq 0 ]; then
-              echo "✅ $FILE: سالم است"
+              echo "✅ $FILE: سلامت کامل مجموعه آرشیو تایید شد."
               echo "### ✅ \`$FILE\`" >> $SUMMARY_FILE
               echo "- **وضعیت:** سالم (Healthy)" >> $SUMMARY_FILE
+              echo "- **نتیجه:** استخراج کل پارت‌ها موفقیت‌آمیز بود." >> $SUMMARY_FILE
               echo "" >> $SUMMARY_FILE
             else
-              echo "❌ $FILE: دارای خطای استخراج یا CRC است"
+              echo "❌ $FILE: مجموعه پارت‌ها دارای خطای CRC یا قطع انتهای آرشیو است!"
               HAS_ERROR=1
               echo "### ❌ \`$FILE\`" >> $SUMMARY_FILE
-              echo "- **وضعیت:** ⚠️ دارای خطا (Corrupt / CRC / Header Error)" >> $SUMMARY_FILE
+              echo "- **وضعیت:** ⚠️ دارای خطا (Corrupt / CRC / Header / Password Error)" >> $SUMMARY_FILE
               echo '```' >> $SUMMARY_FILE
-              echo "$TEST_OUTPUT" >> $SUMMARY_FILE
+              echo "$TEST_OUTPUT" | tail -n 25 >> $SUMMARY_FILE
               echo '```' >> $SUMMARY_FILE
               echo "" >> $SUMMARY_FILE
             fi
@@ -199,7 +198,13 @@ jobs:
               if [[ "$f" =~ \.txt$ ]] || [[ "$f" =~ \.json$ ]]; then
                 continue
               fi
-              test_single_file "$f"
+              # For multi-part RAR archives (.part02.rar, .part03.rar, etc.), skip sub-parts and ONLY test .part01.rar / .part1.rar
+              if [[ "$f" =~ \.part[0-9]+\.rar$ ]] && [[ ! "$f" =~ \.part0*1\.rar$ ]]; then
+                echo "⏭️ Skipping sub-part volume: $f (Tested automatically via part01)"
+                continue
+              fi
+
+              test_archive_set "$f"
             fi
           done
 
