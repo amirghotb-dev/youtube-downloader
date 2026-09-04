@@ -64,7 +64,6 @@ jobs:
             const $ = cheerio.load(html);
             const downloadLinks = [];
 
-            // Extract links from download buttons/links
             $('a[href]').each((i, el) => {
               const href = $(el).attr('href');
               if (href && (
@@ -93,7 +92,6 @@ jobs:
               process.exit(1);
             }
 
-            // Follow HTTP redirects to resolve direct final storage URLs
             const finalUrls = [];
             for (const link of downloadLinks) {
               try {
@@ -143,7 +141,7 @@ jobs:
           echo "📂 Downloaded files list & sizes:"
           ls -lh
 
-      - name: 🧪 Test Archive Integrity & Extraction (CRC / Header Check)
+      - name: 🧪 Test Archive Integrity & Extraction (Detailed Log Diagnosis)
         id: test_archive
         run: |
           cd downloads
@@ -157,45 +155,36 @@ jobs:
 
           HAS_ERROR=0
 
-          test_file() {
+          test_single_file() {
             FILE="$1"
             echo "--------------------------------------------------------"
-            echo "🔍 Testing integrity for: $FILE"
+            echo "🔍 Testing integrity for file: $FILE"
 
             TEST_OUTPUT=""
             STATUS=0
 
-            # First try testing with 7z (supports RAR4, RAR5, ZIP, 7Z, multipart)
+            # Direct test command
             if [ -n "$PASS" ]; then
-              TEST_OUTPUT=$(7z t -p"$PASS" "$FILE" 2>&1) || STATUS=$?
+              TEST_OUTPUT=$(unrar t -p"$PASS" "$FILE" 2>&1) || STATUS=$?
             else
-              TEST_OUTPUT=$(7z t "$FILE" 2>&1) || STATUS=$?
+              TEST_OUTPUT=$(unrar t "$FILE" 2>&1) || STATUS=$?
             fi
 
-            # If 7z fails and file is RAR/part.rar, try unrar as backup test
-            if [ $STATUS -ne 0 ] && ([[ "$FILE" =~ \.rar$ ]] || [[ "$FILE" =~ \.part[0-9]+\.rar$ ]]); then
-              echo "7z test failed/skipped, retrying with unrar..."
-              STATUS=0
-              if [ -n "$PASS" ]; then
-                TEST_OUTPUT=$(unrar t -p"$PASS" "$FILE" 2>&1) || STATUS=$?
-              else
-                TEST_OUTPUT=$(unrar t "$FILE" 2>&1) || STATUS=$?
-              fi
-            fi
+            # Print full console log output so user can see exact line causing error
+            echo "$TEST_OUTPUT"
 
             if [ $STATUS -eq 0 ]; then
-              echo "✅ $FILE: سالم است (No CRC/Header errors found)"
+              echo "✅ $FILE: سالم است"
               echo "### ✅ \`$FILE\`" >> $SUMMARY_FILE
               echo "- **وضعیت:** سالم (Healthy)" >> $SUMMARY_FILE
-              echo "- **نتیجه:** استخراج و CRC موفقیت‌آمیز بود." >> $SUMMARY_FILE
               echo "" >> $SUMMARY_FILE
             else
-              echo "❌ $FILE: دارای خطا می‌باشد! (CRC/Header/Password error)"
+              echo "❌ $FILE: دارای خطای استخراج یا CRC است"
               HAS_ERROR=1
               echo "### ❌ \`$FILE\`" >> $SUMMARY_FILE
               echo "- **وضعیت:** ⚠️ دارای خطا (Corrupt / CRC / Header Error)" >> $SUMMARY_FILE
               echo '```' >> $SUMMARY_FILE
-              echo "$TEST_OUTPUT" | tail -n 20 >> $SUMMARY_FILE
+              echo "$TEST_OUTPUT" >> $SUMMARY_FILE
               echo '```' >> $SUMMARY_FILE
               echo "" >> $SUMMARY_FILE
             fi
@@ -205,16 +194,11 @@ jobs:
 
           for f in $FILES; do
             if [ -f "$f" ]; then
-              # Skip non-archive files
               if [[ "$f" =~ \.txt$ ]] || [[ "$f" =~ \.json$ ]]; then
                 continue
               fi
-              # Skip multi-part volume sub-files (part2, part3...) because testing part1 automatically tests full volume chain
-              if [[ "$f" =~ \.part[0-9]+\.rar$ ]] && [[ ! "$f" =~ \.part0*1\.rar$ ]]; then
-                echo "⏭️ Skipping multi-part volume sub-file $f (will be tested automatically with part1)"
-                continue
-              fi
-              test_file "$f"
+              # Test EVERY file individually so we know exactly which part is corrupt or broken
+              test_single_file "$f"
             fi
           done
 
