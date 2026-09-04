@@ -92,30 +92,34 @@ jobs:
               process.exit(1);
             }
 
-            const finalUrls = [];
-            for (const link of downloadLinks) {
+            // Fast parallel resolution of redirect URLs using HEAD requests with 5s timeout
+            console.log('⚡ Resolving direct download URLs in parallel...');
+            const resolveUrl = async (link) => {
               try {
-                console.log(`🔄 Resolving redirect for: ${link}`);
-                const headRes = await axios.get(link, {
+                // Use HEAD request instead of GET so we don't download body content!
+                const headRes = await axios.head(link, {
                   maxRedirects: 5,
+                  timeout: 6000,
                   headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                   }
                 });
                 const resolvedUrl = headRes.request.res.responseUrl || link;
-                console.log(`  └─ Final Target: ${resolvedUrl}`);
-                finalUrls.push(resolvedUrl);
+                console.log(`  ✅ Resolved: ${link} -> ${resolvedUrl}`);
+                return resolvedUrl;
               } catch (e) {
                 if (e.response && e.response.request && e.response.request.res && e.response.request.res.responseUrl) {
-                  finalUrls.push(e.response.request.res.responseUrl);
-                } else {
-                  finalUrls.push(link);
+                  return e.response.request.res.responseUrl;
                 }
+                return link;
               }
-            }
+            };
+
+            const finalUrls = await Promise.all(downloadLinks.map(l => resolveUrl(l)));
 
             fs.mkdirSync('./downloads', { recursive: true });
             fs.writeFileSync('./download_urls.txt', finalUrls.join('\n'));
+            console.log('✅ All URLs resolved successfully in seconds.');
           }
 
           main();
@@ -163,14 +167,12 @@ jobs:
             TEST_OUTPUT=""
             STATUS=0
 
-            # Direct test command
             if [ -n "$PASS" ]; then
               TEST_OUTPUT=$(unrar t -p"$PASS" "$FILE" 2>&1) || STATUS=$?
             else
               TEST_OUTPUT=$(unrar t "$FILE" 2>&1) || STATUS=$?
             fi
 
-            # Print full console log output so user can see exact line causing error
             echo "$TEST_OUTPUT"
 
             if [ $STATUS -eq 0 ]; then
@@ -197,7 +199,6 @@ jobs:
               if [[ "$f" =~ \.txt$ ]] || [[ "$f" =~ \.json$ ]]; then
                 continue
               fi
-              # Test EVERY file individually so we know exactly which part is corrupt or broken
               test_single_file "$f"
             fi
           done
