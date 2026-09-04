@@ -1,0 +1,210 @@
+name: 🧪 Check Game Archives Integrity (CRC/Header Test)
+
+on:
+  workflow_dispatch:
+    inputs:
+      game_url:
+        description: '🔗 لینک صفحه بازی (مثلا: https://ninten2.ir/downloads/mario-wonder)'
+        required: true
+        type: string
+      archive_password:
+        description: '🔑 رمز فایل زیپ/رار (پیش‌فرض: ninten2.ir)'
+        required: false
+        default: 'ninten2.ir'
+        type: string
+
+jobs:
+  check-archives:
+    name: 🔍 Test Archive Extraction & Integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: 🧹 Free Disk Space (Maximize Runner Space)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: 📦 Install Extraction & Tooling Suite (aria2, 7zip, unrar, cheerio)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2 p7zip-full unrar zip unzip python3
+          npm install cheerio axios
+
+      - name: 🌐 Scrape Download Links & Download Files
+        id: download_files
+        run: |
+          node -e "
+          const fs = require('fs');
+          const cheerio = require('cheerio');
+          const axios = require('axios');
+          const { execSync } = require('child_process');
+
+          async function main() {
+            const pageUrl = process.env.GAME_URL;
+            console.log('🌐 Fetching game page:', pageUrl);
+
+            let html = '';
+            try {
+              const res = await axios.get(pageUrl, {
+                headers: {
+                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                }
+              });
+              html = res.data;
+            } catch (err) {
+              console.error('❌ Failed to load URL:', err.message);
+              process.exit(1);
+            }
+
+            const \$ = cheerio.load(html);
+            const downloadLinks = [];
+
+            // Extract all direct download links from page (both directly in href or /downloads/file/ redirect URLs)
+            $('a[href]').each((i, el) => {
+              const href = $(el).attr('href');
+              if (href && (
+                href.includes('/downloads/file/') ||
+                href.match(/\.(zip|rar|7z|part\d+\.rar|001|nsp|xci|nsz)(\?.*)?$/i) ||
+                href.includes('dl.ninten2') ||
+                href.includes('dl.')
+              )) {
+                let absoluteUrl = href;
+                if (href.startsWith('/')) {
+                  const parsed = new URL(pageUrl);
+                  absoluteUrl = parsed.origin + href;
+                }
+                if (!downloadLinks.includes(absoluteUrl)) {
+                  downloadLinks.push(absoluteUrl);
+                }
+              }
+            });
+
+            console.log('🔗 Found ' + downloadLinks.length + ' download link(s):');
+            downloadLinks.forEach(l => console.log(' - ' + l));
+
+            if (downloadLinks.length === 0) {
+              console.error('❌ No download links found on the specified page!');
+              process.exit(1);
+            }
+
+            fs.mkdirSync('./downloads', { recursive: true });
+
+            // Save links to file for aria2c
+            fs.writeFileSync('./download_urls.txt', downloadLinks.join('\n'));
+          }
+
+          main();
+          "
+        env:
+          GAME_URL: ${{ github.event.inputs.game_url }}
+
+      - name: ⚡ Download Files using Aria2c High Speed
+        run: |
+          mkdir -p downloads
+          cd downloads
+          aria2c -i ../download_urls.txt \
+            -j 4 -s 8 -x 8 \
+            --check-certificate=false \
+            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+            --auto-file-renaming=false \
+            --allow-overwrite=true || true
+          
+          echo "📂 Downloaded files:"
+          ls -lh
+
+      - name: 🧪 Test Archive Integrity & Extraction (CRC / Header Check)
+        id: test_archive
+        run: |
+          cd downloads
+          PASS="${{ github.event.inputs.archive_password }}"
+          
+          SUMMARY_FILE="$GITHUB_WORKSPACE/archive_report.txt"
+          echo "## 📊 گزارش تست سلامت فایل‌های آرشیو" > $SUMMARY_FILE
+          echo "- **صفحه بازی:** ${{ github.event.inputs.game_url }}" >> $SUMMARY_FILE
+          echo "- **تاریخ تست:** $(date '+%Y-%m-%d %H:%M:%S UTC')" >> $SUMMARY_FILE
+          echo "" >> $SUMMARY_FILE
+
+          HAS_ERROR=0
+
+          # Function to test 7z / zip / rar / 001 files
+          test_file() {
+            FILE="$1"
+            echo "--------------------------------------------------------"
+            echo "🔍 Testing integrity for: $FILE"
+
+            EXT="${FILE##*.}"
+            EXT_LOWER=$(echo "$EXT" | tr '[:upper:]' '[:lower:]')
+
+            TEST_OUTPUT=""
+            STATUS=0
+
+            if [[ "$FILE" =~ \.part[0-9]+\.rar$ ]] || [[ "$FILE" =~ \.rar$ ]]; then
+              # If part2, part3 etc., 7z/unrar will test starting from part1 automatically, but we test unrar t
+              echo "Testing RAR archive with password..."
+              TEST_OUTPUT=$(unrar t -p"$PASS" "$FILE" 2>&1) || STATUS=$?
+            elif [[ "$EXT_LOWER" == "zip" ]]; then
+              echo "Testing ZIP archive with password..."
+              TEST_OUTPUT=$(7z t -p"$PASS" "$FILE" 2>&1) || STATUS=$?
+            elif [[ "$EXT_LOWER" == "7z" ]] || [[ "$FILE" =~ \.7z\.[0-9]+$ ]]; then
+              echo "Testing 7Z archive..."
+              TEST_OUTPUT=$(7z t -p"$PASS" "$FILE" 2>&1) || STATUS=$?
+            else
+              echo "Testing generic format via 7z..."
+              TEST_OUTPUT=$(7z t -p"$PASS" "$FILE" 2>&1) || STATUS=$?
+            fi
+
+            if [ $STATUS -eq 0 ]; then
+              echo "✅ $FILE: سالم است (No CRC/Header errors found)"
+              echo "### ✅ \`$FILE\`" >> $SUMMARY_FILE
+              echo "- **وضعیت:** سالم (Healthy)" >> $SUMMARY_FILE
+              echo "- **نتیجه:** استخراج و CRC موفقیت‌آمیز بود." >> $SUMMARY_FILE
+              echo "" >> $SUMMARY_FILE
+            else
+              echo "❌ $FILE: دارای خطا می‌باشد! (CRC/Header/Password error)"
+              HAS_ERROR=1
+              echo "### ❌ \`$FILE\`" >> $SUMMARY_FILE
+              echo "- **وضعیت:** ⚠️ دارای خطا (Corrupt / CRC / Header Error)" >> $SUMMARY_FILE
+              echo "-\`\`\`" >> $SUMMARY_FILE
+              echo "$TEST_OUTPUT" | tail -n 15 >> $SUMMARY_FILE
+              echo "-\`\`\`" >> $SUMMARY_FILE
+              echo "" >> $SUMMARY_FILE
+            fi
+          }
+
+          # Get main files (excluding sub-part duplicates like part2.rar if part1 exists, but test single files)
+          FILES=$(ls -1)
+
+          for f in $FILES; do
+            if [ -f "$f" ]; then
+              # Skip part2, part3 if part1 exists (unrar t on part1 tests the entire volume set)
+              if [[ "$f" =~ \.part[0-9]+\.rar$ ]] && [[ ! "$f" =~ \.part0*1\.rar$ ]]; then
+                echo "⏭️ Skipping multi-part volume sub-file $f (will be tested automatically with part1)"
+                continue
+              fi
+              test_file "$f"
+            fi
+          done
+
+          if [ $HAS_ERROR -eq 1 ]; then
+            echo "FAILED_STATE=true" >> $GITHUB_ENV
+          fi
+
+      - name: 📋 Display Summary Report
+        if: always()
+        run: |
+          if [ -f "$GITHUB_WORKSPACE/archive_report.txt" ]; then
+            cat "$GITHUB_WORKSPACE/archive_report.txt" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: 🚨 Fail Workflow if Integrity Errors Detected
+        if: env.FAILED_STATE == 'true'
+        run: |
+          echo "❌ حداقل یکی از فایل‌های دانلود شده خراب است یا دارای خطای CRC / Header است!"
+          exit 1
