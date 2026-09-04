@@ -93,7 +93,7 @@ jobs:
               process.exit(1);
             }
 
-            // Follow HTTP redirects to resolve direct final storage URLs (e.g. resolve /downloads/file/573 to final URL)
+            // Follow HTTP redirects to resolve direct final storage URLs
             const finalUrls = [];
             for (const link of downloadLinks) {
               try {
@@ -140,7 +140,7 @@ jobs:
             --auto-file-renaming=false \
             --allow-overwrite=true || true
           
-          echo "📂 Downloaded files:"
+          echo "📂 Downloaded files list & sizes:"
           ls -lh
 
       - name: 🧪 Test Archive Integrity & Extraction (CRC / Header Check)
@@ -162,24 +162,25 @@ jobs:
             echo "--------------------------------------------------------"
             echo "🔍 Testing integrity for: $FILE"
 
-            EXT="${FILE##*.}"
-            EXT_LOWER=$(echo "$EXT" | tr '[:upper:]' '[:lower:]')
-
             TEST_OUTPUT=""
             STATUS=0
 
-            if [[ "$FILE" =~ \.part[0-9]+\.rar$ ]] || [[ "$FILE" =~ \.rar$ ]]; then
-              echo "Testing RAR archive with password..."
-              TEST_OUTPUT=$(unrar t -p"$PASS" "$FILE" 2>&1) || STATUS=$?
-            elif [[ "$EXT_LOWER" == "zip" ]]; then
-              echo "Testing ZIP archive with password..."
-              TEST_OUTPUT=$(7z t -p"$PASS" "$FILE" 2>&1) || STATUS=$?
-            elif [[ "$EXT_LOWER" == "7z" ]] || [[ "$FILE" =~ \.7z\.[0-9]+$ ]]; then
-              echo "Testing 7Z archive..."
+            # First try testing with 7z (supports RAR4, RAR5, ZIP, 7Z, multipart)
+            if [ -n "$PASS" ]; then
               TEST_OUTPUT=$(7z t -p"$PASS" "$FILE" 2>&1) || STATUS=$?
             else
-              echo "Testing generic format via 7z..."
-              TEST_OUTPUT=$(7z t -p"$PASS" "$FILE" 2>&1) || STATUS=$?
+              TEST_OUTPUT=$(7z t "$FILE" 2>&1) || STATUS=$?
+            fi
+
+            # If 7z fails and file is RAR/part.rar, try unrar as backup test
+            if [ $STATUS -ne 0 ] && ([[ "$FILE" =~ \.rar$ ]] || [[ "$FILE" =~ \.part[0-9]+\.rar$ ]]); then
+              echo "7z test failed/skipped, retrying with unrar..."
+              STATUS=0
+              if [ -n "$PASS" ]; then
+                TEST_OUTPUT=$(unrar t -p"$PASS" "$FILE" 2>&1) || STATUS=$?
+              else
+                TEST_OUTPUT=$(unrar t "$FILE" 2>&1) || STATUS=$?
+              fi
             fi
 
             if [ $STATUS -eq 0 ]; then
@@ -194,7 +195,7 @@ jobs:
               echo "### ❌ \`$FILE\`" >> $SUMMARY_FILE
               echo "- **وضعیت:** ⚠️ دارای خطا (Corrupt / CRC / Header Error)" >> $SUMMARY_FILE
               echo '```' >> $SUMMARY_FILE
-              echo "$TEST_OUTPUT" | tail -n 15 >> $SUMMARY_FILE
+              echo "$TEST_OUTPUT" | tail -n 20 >> $SUMMARY_FILE
               echo '```' >> $SUMMARY_FILE
               echo "" >> $SUMMARY_FILE
             fi
@@ -204,6 +205,11 @@ jobs:
 
           for f in $FILES; do
             if [ -f "$f" ]; then
+              # Skip non-archive files
+              if [[ "$f" =~ \.txt$ ]] || [[ "$f" =~ \.json$ ]]; then
+                continue
+              fi
+              # Skip multi-part volume sub-files (part2, part3...) because testing part1 automatically tests full volume chain
               if [[ "$f" =~ \.part[0-9]+\.rar$ ]] && [[ ! "$f" =~ \.part0*1\.rar$ ]]; then
                 echo "⏭️ Skipping multi-part volume sub-file $f (will be tested automatically with part1)"
                 continue
