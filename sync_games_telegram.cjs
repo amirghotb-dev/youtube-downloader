@@ -298,8 +298,11 @@ async function run() {
                     try {
                         const targetPath = path.join(DEST_DIR, `${sanitizeFilename(fileItem.name)}`);
                         const dlUrl = mirror.directUrl || mirror.intermediateUrl;
-                        downloadedFilePath = await downloadFile(dlUrl, targetPath);
-                        if (downloadedFilePath) break;
+                        const dlResult = await downloadFile(dlUrl, targetPath);
+                        if (dlResult) {
+                            downloadedFilePath = typeof dlResult === 'object' ? dlResult.destPath : dlResult;
+                            if (downloadedFilePath && fs.existsSync(downloadedFilePath)) break;
+                        }
                     } catch (dlErr) {
                         console.warn(`    ⚠️ Mirror download failed: ${dlErr.message}`);
                     }
