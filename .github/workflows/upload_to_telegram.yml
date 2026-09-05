@@ -37,6 +37,14 @@ jobs:
           mkdir -p downloads
           aria2c -x 16 -s 16 -k 1M "${{ github.event.inputs.file_url }}" -d downloads/
 
+      - name: ⚡ Start Local Telegram Bot API Server (Enable 2GB Upload Mode)
+        run: |
+          echo "🚀 Starting Telegram Bot API Local Server (2GB Upload Support)..."
+          docker run -d -p 8081:8081 -e TELEGRAM_API_ID=${{ secrets.TELEGRAM_API_ID || '611335' }} -e TELEGRAM_API_HASH=${{ secrets.TELEGRAM_API_HASH || '284b136413271772e392e697011edd16' }} aiogram/telegram-bot-api --local --local-mode
+          echo "TELEGRAM_BOT_API_HOST=127.0.0.1:8081" >> $GITHUB_ENV
+          echo "TELEGRAM_LOCAL_SERVER=true" >> $GITHUB_ENV
+          sleep 4
+
       - name: ✈️ Upload File to Telegram Storage
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

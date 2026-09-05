@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Telegram Automated Uploader with MTProto & 2GB Large File Support
+ * Telegram Automated Uploader with Smart Local Server & Multi-Part Chunking Support
  * Designed for Ninten2 ROM & File Distribution System via Cloudflare Worker Proxy
  */
 
@@ -11,8 +11,12 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const MAX_PART_SIZE = 2000 * 1024 * 1024; // 2GB (2000MB) per part for Telegram MTProto / Local Server
-const HTTP_API_LIMIT = 48 * 1024 * 1024; // 48MB for standard HTTP Bot API
+const HTTP_API_HOST = process.env.TELEGRAM_BOT_API_HOST || 'api.telegram.org';
+const IS_LOCAL_SERVER = HTTP_API_HOST !== 'api.telegram.org' || process.env.TELEGRAM_LOCAL_SERVER === 'true';
+
+// If running against Local Telegram Bot API Server, upload up to 2GB per part.
+// If running against official api.telegram.org, cap at 45MB per part to prevent HTTP 413.
+const MAX_PART_SIZE = IS_LOCAL_SERVER ? 2000 * 1024 * 1024 : 45 * 1024 * 1024;
 
 let TelegramClient = null;
 let StringSession = null;
@@ -29,7 +33,7 @@ const TELEGRAM_API_HASH = process.env.TELEGRAM_API_HASH || '284b136413271772e392
 /**
  * Make HTTP/HTTPS request with retries
  */
-function request(options, data = null, isMultipart = false, retries = 3, timeoutMs = 120000) {
+function request(options, data = null, isMultipart = false, retries = 3, timeoutMs = 180000) {
     return new Promise((resolve, reject) => {
         const protocol = options.protocol === 'http:' ? http : https;
 
@@ -120,7 +124,7 @@ async function uploadViaMTProto(botToken, chatId, filePath, caption = '', fileNa
 }
 
 /**
- * Upload a single file chunk via standard HTTP Bot API (< 48MB)
+ * Upload a single file chunk via HTTP Bot API
  */
 async function sendDocumentToTelegram(botToken, chatId, filePath, caption = '', fileName = null) {
     const targetName = fileName || path.basename(filePath);
@@ -149,12 +153,15 @@ async function sendDocumentToTelegram(botToken, chatId, filePath, caption = '', 
         Buffer.from(footer, 'utf-8')
     ]);
 
-    const apiHost = process.env.TELEGRAM_BOT_API_HOST || 'api.telegram.org';
-    const isLocal = apiHost !== 'api.telegram.org';
+    const parsedHost = HTTP_API_HOST.split(':');
+    const hostname = parsedHost[0];
+    const port = parsedHost[1] ? parseInt(parsedHost[1], 10) : (IS_LOCAL_SERVER ? 8081 : 443);
+    const isHttps = !IS_LOCAL_SERVER && port === 443;
 
     const options = {
-        hostname: apiHost,
-        port: isLocal ? 8081 : 443,
+        protocol: isHttps ? 'https:' : 'http:',
+        hostname: hostname,
+        port: port,
         path: `/bot${botToken}/sendDocument`,
         method: 'POST',
         headers: {
@@ -179,7 +186,7 @@ async function sendDocumentToTelegram(botToken, chatId, filePath, caption = '', 
 }
 
 /**
- * Upload file to Telegram storage with automatic 2GB multi-part splitting
+ * Upload file to Telegram storage with automatic multi-part splitting
  */
 async function uploadFileToTelegram(botToken, chatId, filePath, customFileName = null, workerDomain = 'dl.ninten2.com') {
     if (!fs.existsSync(filePath)) {
@@ -191,14 +198,18 @@ async function uploadFileToTelegram(botToken, chatId, filePath, customFileName =
     const fileName = customFileName || path.basename(filePath);
     const domain = workerDomain.replace(/^https?:\/\//, '').replace(/\/$/, '');
 
+    const partSizeMb = (MAX_PART_SIZE / (1024 * 1024)).toFixed(0);
     console.log(`\n🚀 Preparing Telegram Upload for "${fileName}" (${(fileSize / (1024 * 1024)).toFixed(2)} MB)...`);
+    console.log(`ℹ️ Mode: ${IS_LOCAL_SERVER ? 'Local Server (2GB Parts)' : 'HTTP Bot API (45MB Parts)'}`);
 
-    // Case 1: File fits within 2GB limit
+    // Case 1: File fits within max part size
     if (fileSize <= MAX_PART_SIZE) {
-        console.log(`📦 File is under 2GB. Uploading single file to Telegram...`);
+        console.log(`📦 File is under ${partSizeMb}MB. Uploading single file...`);
         let result;
 
-        if (fileSize > HTTP_API_LIMIT && TelegramClient) {
+        if (IS_LOCAL_SERVER) {
+            result = await sendDocumentToTelegram(botToken, chatId, filePath, `🎮 ${fileName}`, fileName);
+        } else if (fileSize > 45 * 1024 * 1024 && TelegramClient) {
             try {
                 result = await uploadViaMTProto(botToken, chatId, filePath, `🎮 ${fileName}`, fileName);
             } catch (mtErr) {
@@ -222,17 +233,18 @@ async function uploadFileToTelegram(botToken, chatId, filePath, customFileName =
         };
     }
 
-    // Case 2: Extremely large file > 2GB -> Split into 2000MB (2GB) parts
-    console.log(`✂️ File exceeds 2GB. Splitting into 2000MB (2GB) parts for Telegram upload...`);
+    // Case 2: File exceeds MAX_PART_SIZE -> Split into parts
+    const splitSizeArg = IS_LOCAL_SERVER ? '2000m' : '45m';
+    console.log(`✂️ File exceeds ${partSizeMb}MB. Splitting into ${splitSizeArg} parts for Telegram upload...`);
 
     const tempDir = fs.mkdtempSync(path.join(process.cwd(), 'temp_tg_parts_'));
     const partPrefix = path.join(tempDir, 'part_');
 
     try {
-        execSync(`split -b 2000m "${filePath}" "${partPrefix}"`);
+        execSync(`split -b ${splitSizeArg} "${filePath}" "${partPrefix}"`);
         const createdParts = fs.readdirSync(tempDir).filter(f => f.startsWith('part_')).sort();
 
-        console.log(`📦 Split into ${createdParts.length} part(s) of 2GB each. Uploading to Telegram channel...`);
+        console.log(`📦 Split into ${createdParts.length} part(s). Uploading to Telegram channel...`);
 
         const uploadedParts = [];
 
@@ -242,16 +254,7 @@ async function uploadFileToTelegram(botToken, chatId, filePath, customFileName =
             const partName = `${fileName}.part${i + 1}`;
 
             console.log(`   ⏳ Uploading Part ${i + 1}/${createdParts.length}: ${partName}...`);
-            let tgPart;
-            if (fs.statSync(partPath).size > HTTP_API_LIMIT && TelegramClient) {
-                try {
-                    tgPart = await uploadViaMTProto(botToken, chatId, partPath, `📦 ${partName} (${i + 1}/${createdParts.length})`, partName);
-                } catch (e) {
-                    tgPart = await sendDocumentToTelegram(botToken, chatId, partPath, `📦 ${partName} (${i + 1}/${createdParts.length})`, partName);
-                }
-            } else {
-                tgPart = await sendDocumentToTelegram(botToken, chatId, partPath, `📦 ${partName} (${i + 1}/${createdParts.length})`, partName);
-            }
+            let tgPart = await sendDocumentToTelegram(botToken, chatId, partPath, `📦 ${partName} (${i + 1}/${createdParts.length})`, partName);
 
             const partUrl = `https://${domain}/?file_id=${tgPart.file_id}`;
             uploadedParts.push({
@@ -264,7 +267,7 @@ async function uploadFileToTelegram(botToken, chatId, filePath, customFileName =
 
         const mainUrl = uploadedParts[0].url;
 
-        console.log(`\n🎉 All ${uploadedParts.length} 2GB parts uploaded to Telegram!`);
+        console.log(`\n🎉 All ${uploadedParts.length} parts uploaded to Telegram!`);
         console.log(`🌐 Primary Download Link: ${mainUrl}`);
 
         return {
@@ -320,7 +323,7 @@ async function main() {
         const result = await uploadFileToTelegram(botToken, chatId, filePath, customName, workerDomain);
 
         console.log('\n=============================================');
-        console.log('🎉 TELEGRAM 2GB UPLOAD COMPLETE!');
+        console.log('🎉 TELEGRAM UPLOAD COMPLETE!');
         console.log(`🎮 File Name:    ${result.name}`);
         console.log(`📦 Size:         ${(result.size / (1024 * 1024)).toFixed(2)} MB`);
         console.log(`🧩 Parts Count:  ${result.parts_count}`);
