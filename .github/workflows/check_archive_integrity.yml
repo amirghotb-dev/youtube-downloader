@@ -134,10 +134,13 @@ jobs:
           mkdir -p downloads
           cd downloads
           aria2c -i ../download_urls.txt \
-            -j 4 -s 8 -x 8 \
-            --header="User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            -j 2 -s 4 -x 4 \
+            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36" \
+            --header="Referer: https://ninten2.ir/" \
             --check-certificate=false \
             --auto-file-renaming=false \
+            --retry-wait=3 \
+            --max-tries=5 \
             --allow-overwrite=true || true
           
           echo "📂 Downloaded files list & sizes:"
