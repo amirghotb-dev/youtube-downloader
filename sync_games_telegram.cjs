@@ -51,7 +51,7 @@ const WORKER_DOMAIN = params['worker-domain'] || process.env.CLOUDFLARE_WORKER_D
 const DEST_DIR = params['dest-dir'] || path.join(process.cwd(), 'downloads');
 const SINGLE_URL = params['single-url'] || null;
 const ZIP_PASSWORD = params['zip-password'] || process.env.ZIP_PASSWORD || 'ninten2.ir';
-const PART_SIZE_MB = parseInt(params['part-size-mb'] || '45', 10) || 45; // 45MB parts for Telegram 50MB limit
+const PART_SIZE_MB = parseInt(params['part-size-mb'] || '2048', 10) || 2048; // 2GB (2048MB) parts for Telegram
 
 /**
  * Make API request to Laravel website
