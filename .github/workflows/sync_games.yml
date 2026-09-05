@@ -1,9 +1,8 @@
 name: 🎮 NSWPedia to AbreHamrahi Game Sync Worker
 
 on:
-  schedule:
-    # Run every 2 hours to check for pending games
-    - cron: '0 */2 * * *'
+  # schedule:
+  #   - cron: '0 */2 * * *'
   workflow_dispatch:
     inputs:
       single_url:
