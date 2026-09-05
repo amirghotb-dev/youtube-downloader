@@ -176,12 +176,17 @@ async function sendDocumentToTelegram(botToken, chatId, filePath, caption = '', 
         throw new Error(`Telegram sendDocument failed (HTTP ${res.status}): ${JSON.stringify(res.body)}`);
     }
 
-    const doc = res.body.result.document;
+    const resObj = res.body.result || {};
+    const doc = resObj.document || {};
+    const chat = resObj.chat || {};
+
     return {
-        file_id: doc.file_id,
-        file_unique_id: doc.file_unique_id,
-        file_name: doc.file_name,
-        file_size: doc.file_size
+        file_id: doc.file_id || String(resObj.message_id || ''),
+        file_unique_id: doc.file_unique_id || '',
+        file_name: doc.file_name || targetName,
+        file_size: doc.file_size || payload.length,
+        message_id: resObj.message_id || null,
+        chat_username: chat.username || null
     };
 }
 
@@ -220,7 +225,17 @@ async function uploadFileToTelegram(botToken, chatId, filePath, customFileName =
             result = await sendDocumentToTelegram(botToken, chatId, filePath, `🎮 ${fileName}`, fileName);
         }
 
-        const publicUrl = `https://${domain}/?file_id=${result.file_id}`;
+        let channelParam = result.chat_username;
+        if (!channelParam && chatId) {
+            const cleanId = String(chatId).replace(/^-100/, '');
+            channelParam = `c/${cleanId}`;
+        }
+
+        let publicUrl = `https://${domain}/?file_id=${result.file_id}`;
+        if (channelParam && result.message_id) {
+            publicUrl += `&channel=${encodeURIComponent(channelParam)}&msg=${result.message_id}`;
+        }
+
         console.log(`✅ Upload complete! Public Link: ${publicUrl}`);
 
         return {
@@ -256,7 +271,17 @@ async function uploadFileToTelegram(botToken, chatId, filePath, customFileName =
             console.log(`   ⏳ Uploading Part ${i + 1}/${createdParts.length}: ${partName}...`);
             let tgPart = await sendDocumentToTelegram(botToken, chatId, partPath, `📦 ${partName} (${i + 1}/${createdParts.length})`, partName);
 
-            const partUrl = `https://${domain}/?file_id=${tgPart.file_id}`;
+            let channelParam = tgPart.chat_username;
+            if (!channelParam && chatId) {
+                const cleanId = String(chatId).replace(/^-100/, '');
+                channelParam = `c/${cleanId}`;
+            }
+
+            let partUrl = `https://${domain}/?file_id=${tgPart.file_id}`;
+            if (channelParam && tgPart.message_id) {
+                partUrl += `&channel=${encodeURIComponent(channelParam)}&msg=${tgPart.message_id}`;
+            }
+
             uploadedParts.push({
                 part: i + 1,
                 file_id: tgPart.file_id,

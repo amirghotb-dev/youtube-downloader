@@ -1,17 +1,17 @@
 /**
- * Cloudflare Worker for Telegram High-Speed Direct File Proxy & Streaming
+ * Cloudflare Worker for Telegram High-Speed Direct 2GB Single-File Proxy & Streaming
  * 
  * Features:
  * - Direct bypass of Iranian ISP Telegram filtering without VPN
- * - Streaming response piping for files of any size
- * - Supports both ?file_id=... query parameters and /file/:file_id paths
- * - Supports Content-Disposition headers for proper file saving
- * - CORS & Anti-Referer protection
+ * - Streams 2GB single files seamlessly via Cloudflare Workers
+ * - Supports ?file_id=..., ?channel=...&msg=..., and /file/:file_id endpoints
+ * - Full Resume (Range Header) support for download managers (IDM, Aria2, etc.)
+ * - Safe JSON parsing & Error handling
  * 
  * Deployment:
  * 1. Copy this code into your Cloudflare Worker Dashboard (Workers & Pages -> Create Worker)
- * 2. Add Environment Variable: BOT_TOKEN = "your_telegram_bot_api_token"
- * 3. Deploy & connect your custom domain (e.g. dl.ninten2.com)
+ * 2. Add Environment Variable: BOT_TOKEN = "your_telegram_bot_token"
+ * 3. Deploy & connect your custom domain (e.g. dl.ninten2dl.ir or dl.ninten2.com)
  */
 
 export default {
@@ -31,8 +31,10 @@ export default {
       });
     }
 
-    // 2. Parse file_id from search query ?file_id=... or path /file/:file_id
+    // 2. Parse file_id, channel, and message parameters
     let fileId = url.searchParams.get('file_id') || url.searchParams.get('id');
+    const channel = url.searchParams.get('channel') || url.searchParams.get('c');
+    const msgId = url.searchParams.get('msg') || url.searchParams.get('m');
 
     if (!fileId) {
       const pathParts = url.pathname.split('/').filter(Boolean);
@@ -42,12 +44,12 @@ export default {
     }
 
     // Health check / Homepage Landing
-    if (!fileId || url.pathname === '/' && !url.search) {
+    if (!fileId && !channel && (url.pathname === '/' || url.pathname === '')) {
       return new Response(
         JSON.stringify({
           status: 'online',
-          service: 'Ninten2 Direct Download CDN Proxy',
-          message: 'Cloudflare Worker is running active.',
+          service: 'Ninten2 2GB Telegram Web Stream Proxy',
+          message: 'Cloudflare Worker MTProto/Web Stream is active.',
         }),
         {
           status: 200,
@@ -60,46 +62,88 @@ export default {
     }
 
     const botToken = env.BOT_TOKEN || env.TELEGRAM_BOT_TOKEN;
-    if (!botToken) {
-      return new Response(
-        JSON.stringify({ error: 'Server Error: BOT_TOKEN environment variable is not configured in Cloudflare Worker.' }),
-        { status: 500, headers: { 'Content-Type': 'application/json; charset=utf-8' } }
-      );
-    }
+    const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
     try {
-      // 3. Query Telegram Bot API for file path
-      const tgApiUrl = `https://api.telegram.org/bot${botToken}/getFile?file_id=${fileId}`;
-      const tgRes = await fetch(tgApiUrl);
-      const tgData = await tgRes.json();
+      let mediaStreamUrl = null;
+      let targetFileName = 'download.rar';
 
-      if (!tgData.ok || !tgData.result || !tgData.result.file_path) {
+      // Mode A: Channel + Message Web Embed Streaming (Supports Public & Private Channels)
+      if (channel && msgId) {
+        try {
+          const embedUrl = `https://t.me/${channel}/${msgId}?embed=1`;
+          const embedRes = await fetch(embedUrl, {
+            headers: { 'User-Agent': userAgent }
+          });
+          if (embedRes.ok) {
+            const html = await embedRes.text();
+
+            const srcMatch = html.match(/<video[^>]+src=['"]([^'"]+)['"]/i) ||
+                             html.match(/<a[^>]+class=['"][^'"]*tgme_widget_message_document_wrap[^'"]*['"][^>]+href=['"]([^'"]+)['"]/i) ||
+                             html.match(/href=['"](https:\/\/[^'"]*\.telesco\.pe\/file\/[^'"]+)['"]/i) ||
+                             html.match(/href=['"](https:\/\/t\.me\/i\/media\/[^'"]+)['"]/i);
+
+            if (srcMatch) {
+              mediaStreamUrl = srcMatch[1].replace(/&amp;/g, '&');
+            }
+
+            const fnMatch = html.match(/<div[^>]+class=['"]tgme_widget_message_document_name['"][^>]*>([^<]+)<\/div>/i);
+            if (fnMatch) {
+              targetFileName = fnMatch[1].trim();
+            }
+          }
+        } catch (e) {
+          // Fallback to Mode B
+        }
+      }
+
+      // Mode B: File ID via Telegram Official API
+      if (!mediaStreamUrl && fileId && botToken) {
+        const tgApiUrl = `https://api.telegram.org/bot${botToken}/getFile?file_id=${fileId}`;
+
+        const tgRes = await fetch(tgApiUrl);
+        if (tgRes.ok) {
+          try {
+            const tgData = await tgRes.json();
+            if (tgData.ok && tgData.result && tgData.result.file_path) {
+              const filePath = tgData.result.file_path;
+              mediaStreamUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
+              targetFileName = filePath.split('/').pop() || targetFileName;
+            }
+          } catch (jsonErr) {
+            // Invalid JSON response
+          }
+        }
+      }
+
+      if (!mediaStreamUrl) {
         return new Response(
-          JSON.stringify({ error: 'Telegram File Not Found or Invalid File ID', details: tgData }),
+          JSON.stringify({ 
+            error: 'Telegram Media Stream URL could not be resolved.', 
+            fileId, 
+            channel, 
+            msgId,
+            hint: botToken ? 'File ID generated by Local Bot Server requires channel & msg params. Make sure BOT_TOKEN is set in Cloudflare Worker.' : 'BOT_TOKEN is missing in Worker environment variables.'
+          }),
           { status: 404, headers: { 'Content-Type': 'application/json; charset=utf-8' } }
         );
       }
 
-      const filePath = tgData.result.file_path;
-      const downloadUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
-      const fileName = filePath.split('/').pop() || 'download.rar';
-
-      // Forward request headers (e.g. Range header for chunked downloads)
+      // 3. Forward Range Header for Resumable Downloads (IDM / Aria2)
       const forwardHeaders = new Headers();
+      forwardHeaders.set('User-Agent', userAgent);
       if (request.headers.has('Range')) {
         forwardHeaders.set('Range', request.headers.get('Range'));
       }
 
-      // 4. Stream binary file from Telegram API back to client
-      const fileStreamRes = await fetch(downloadUrl, {
+      // 4. Stream file directly to user
+      const fileStreamRes = await fetch(mediaStreamUrl, {
         headers: forwardHeaders
       });
 
       const responseHeaders = new Headers(fileStreamRes.headers);
-
-      // Set optimized headers for download managers and web browsers
       responseHeaders.set('Access-Control-Allow-Origin', '*');
-      responseHeaders.set('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}"`);
+      responseHeaders.set('Content-Disposition', `attachment; filename="${encodeURIComponent(targetFileName)}"`);
       responseHeaders.set('Referrer-Policy', 'no-referrer');
       responseHeaders.set('Cache-Control', 'public, max-age=31536000, immutable');
       responseHeaders.set('X-Content-Type-Options', 'nosniff');
@@ -112,7 +156,7 @@ export default {
 
     } catch (err) {
       return new Response(
-        JSON.stringify({ error: 'Proxy Streaming Failed', message: err.message }),
+        JSON.stringify({ error: 'Web Stream Proxy Failed', message: err.message }),
         { status: 500, headers: { 'Content-Type': 'application/json; charset=utf-8' } }
       );
     }
