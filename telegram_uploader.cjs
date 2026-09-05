@@ -16,7 +16,7 @@ const IS_LOCAL_SERVER = HTTP_API_HOST !== 'api.telegram.org' || process.env.TELE
 
 // If running against Local Telegram Bot API Server, upload up to 2GB per part.
 // If running against official api.telegram.org, cap at 45MB per part to prevent HTTP 413.
-const MAX_PART_SIZE = IS_LOCAL_SERVER ? 2000 * 1024 * 1024 : 45 * 1024 * 1024;
+const MAX_PART_SIZE = IS_LOCAL_SERVER ? 1980 * 1024 * 1024 : 45 * 1024 * 1024;
 
 let TelegramClient = null;
 let StringSession = null;
