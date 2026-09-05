@@ -214,7 +214,65 @@ function createProtectedParts(sourceFilePath, destDir, baseName, password = ZIP_
         }
     }
 
+    // Verify archive integrity before returning parts
+    try {
+        verifyArchiveParts(parts, password);
+    } catch (verifyErr) {
+        console.error(`    ❌ Archive integrity verification failed: ${verifyErr.message}`);
+        // Clean up broken parts
+        for (const p of parts) {
+            try { if (fs.existsSync(p.path)) fs.unlinkSync(p.path); } catch {}
+        }
+        throw verifyErr;
+    }
+
     return parts;
+}
+
+/**
+ * Test integrity of created archive parts using rar t, 7z t, or unzip -t
+ */
+function verifyArchiveParts(parts, password = ZIP_PASSWORD) {
+    if (!parts || parts.length === 0) {
+        throw new Error('No archive parts generated to verify.');
+    }
+
+    const firstPart = parts[0];
+    console.log(`    🔍 Verifying archive integrity before upload (${firstPart.format} format, ${parts.length} part(s))...`);
+
+    const format = firstPart.format;
+    const firstPath = firstPart.path;
+
+    if (format === 'RAR') {
+        try {
+            // rar t -p"password" -idq "firstPartPath"
+            const cmd = `rar t -p"${password}" -idq "${firstPath}"`;
+            execSync(cmd, { stdio: 'ignore' });
+            console.log(`    ✅ RAR archive integrity test PASSED (${parts.length} part(s) verified).`);
+        } catch (err) {
+            throw new Error(`RAR archive integrity check failed for ${firstPart.name}: ${err.message}`);
+        }
+    } else if (format === '7Z') {
+        try {
+            const cmd = `7z t -p"${password}" "${firstPath}"`;
+            execSync(cmd, { stdio: 'ignore' });
+            console.log(`    ✅ 7Z archive integrity test PASSED (${parts.length} part(s) verified).`);
+        } catch (err) {
+            throw new Error(`7Z archive integrity check failed for ${firstPart.name}: ${err.message}`);
+        }
+    } else if (format === 'ZIP') {
+        try {
+            let hasUnzip = false;
+            try { execSync('which unzip', { stdio: 'ignore' }); hasUnzip = true; } catch {}
+            const testCmd = hasUnzip
+                ? `unzip -t -P "${password}" "${firstPath}"`
+                : `7z t -p"${password}" "${firstPath}"`;
+            execSync(testCmd, { stdio: 'ignore' });
+            console.log(`    ✅ ZIP archive integrity test PASSED.`);
+        } catch (err) {
+            throw new Error(`ZIP archive integrity check failed for ${firstPart.name}: ${err.message}`);
+        }
+    }
 }
 
 /**
