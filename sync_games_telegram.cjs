@@ -241,8 +241,46 @@ async function run() {
             console.log('🔍 Scraping metadata and download links from NSWPedia...');
             const gameData = await scrapeGame(item.nswpedia_url);
             console.log(`✨ Scraped: "${gameData.title}" | ID: ${gameData.titleId || 'N/A'}`);
+            console.log(`    Mirrors: ${gameData.downloads ? gameData.downloads.length : 0} mirror link(s) found`);
 
-            const selectedFiles = (gameData.downloadFiles || []).filter(f => f.mirrors && f.mirrors.length > 0);
+            function getMirrorScore(url) {
+                if (!url) return -999;
+                const u = url.toLowerCase();
+                if (u.includes('nswpediax.site') || u.includes('invalid') || u.includes('placeholder')) return -100;
+                if (u.includes('dlsitex.online')) return 110;
+                if (u.includes('vikingfile.com')) return 100;
+                if (u.includes('1fichier.com')) return 85;
+                if (u.includes('mediafire.com')) return 80;
+                if (u.includes('megaup.net')) return 75;
+                if (u.includes('gofile.io')) return 70;
+                if (u.includes('datanodes.to')) return 50;
+                if (u.includes('rushupload.com')) return 40;
+                if (u.includes('multiup.')) return 30;
+                return 10;
+            }
+
+            const availableDownloads = (gameData.downloads || []).filter(d => d.directUrl && !d.directUrl.includes('placeholder'));
+            const groupedFiles = new Map();
+
+            for (const mirror of availableDownloads) {
+                const dlcSuffix = mirror.type === 'DLC' ? cleanDlcDisplayName(mirror.name, gameData.title) : '';
+                const uniqueKey = `${mirror.type}_${mirror.version || 'v0'}_${dlcSuffix || mirror.name.toLowerCase()}`;
+                if (!groupedFiles.has(uniqueKey)) {
+                    groupedFiles.set(uniqueKey, {
+                        ...mirror,
+                        mirrors: [mirror]
+                    });
+                } else {
+                    groupedFiles.get(uniqueKey).mirrors.push(mirror);
+                }
+            }
+
+            const selectedFiles = Array.from(groupedFiles.values()).map(item => {
+                item.mirrors.sort((a, b) => getMirrorScore(b.directUrl) - getMirrorScore(a.directUrl));
+                item.directUrl = item.mirrors[0].directUrl;
+                return item;
+            });
+
             if (selectedFiles.length === 0) {
                 throw new Error('No downloadable direct ROM links found on page.');
             }
@@ -259,7 +297,8 @@ async function run() {
                 for (const mirror of fileItem.mirrors) {
                     try {
                         const targetPath = path.join(DEST_DIR, `${sanitizeFilename(fileItem.name)}`);
-                        downloadedFilePath = await downloadFile(mirror.url, targetPath);
+                        const dlUrl = mirror.directUrl || mirror.intermediateUrl;
+                        downloadedFilePath = await downloadFile(dlUrl, targetPath);
                         if (downloadedFilePath) break;
                     } catch (dlErr) {
                         console.warn(`    ⚠️ Mirror download failed: ${dlErr.message}`);
